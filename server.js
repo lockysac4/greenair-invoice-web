@@ -107,4 +107,39 @@ app.get("/backup",(req,res)=>A(req,res,()=>res.send(L("Backup",'<h1>Backup & Mig
 app.post("/import",upload.single("backup"),(req,res)=>A(req,res,async()=>{try{let d=JSON.parse(req.file.buffer.toString()),r=d.Records||d.records;if(!r)throw Error("No Records map found");let c=await pool.connect();try{await c.query("begin");for(let[k,v]of Object.entries(r)){let t=k.includes(":")?k.split(":")[0]:(v.Type||v.type||"unknown").toLowerCase();await c.query("insert into records(record_key,record_type,payload) values($1,$2,$3) on conflict(record_key) do update set record_type=excluded.record_type,payload=excluded.payload,updated_at=now()",[k,t,v])}await c.query("commit")}catch(e){await c.query("rollback");throw e}finally{c.release()}res.redirect("/")}catch(e){res.status(400).send(L("Import error",'<div class=c>'+E(e.message)+'</div>',req.session.user))}}));
 app.post("/snapshot",(req,res)=>A(req,res,async()=>{let r=(await Q("select record_key,payload from records")).rows,o=Object.fromEntries(r.map(x=>[x.record_key,x.payload]));await Q("insert into backups(record_count,payload) values($1,$2)",[r.length,o]);await Q("delete from backups where id not in(select id from backups order by id desc limit 50)");res.redirect("/backup")}));
 app.get("/export",(req,res)=>A(req,res,async()=>{let r=(await Q("select record_key,payload from records")).rows;res.setHeader("Content-Disposition",'attachment; filename="greenair-web-backup.json"');res.json({SchemaVersion:2,ExportedUtc:new Date().toISOString(),Records:Object.fromEntries(r.map(x=>[x.record_key,x.payload]))})}));
-const PORT=Number(process.env.PORT)||10000;app.listen(PORT,"0.0.0.0",()=>console.log(`Greenair Invoice listening on ${PORT}`));init().then(()=>console.log("Database initialised")).catch(e=>console.error("Database init error",e));
+// Staging-only scheduled database snapshots. These are NOT offsite disaster recovery.
+const SNAPSHOT_INTERVAL_MS=24*60*60*1000;
+async function scheduledSnapshot(){
+  if(process.env.ENABLE_STAGING_SNAPSHOTS!=="true")return;
+  const client=await pool.connect();
+  let locked=false;
+  try{
+    const lock=await client.query("SELECT pg_try_advisory_lock(25370025) AS locked");
+    locked=lock.rows[0].locked;
+    if(!locked)return;
+    await client.query("BEGIN");
+    const recent=await client.query("SELECT created_at FROM backups ORDER BY created_at DESC LIMIT 1");
+    if(recent.rows.length && Date.now()-new Date(recent.rows[0].created_at).getTime()<20*60*60*1000){
+      await client.query("COMMIT");return;
+    }
+    const records=await client.query("SELECT record_key,payload FROM records ORDER BY record_key");
+    const data=Object.fromEntries(records.rows.map(r=>[r.record_key,r.payload]));
+    await client.query("INSERT INTO backups(record_count,payload) VALUES($1,$2)",[records.rowCount,data]);
+    await client.query("DELETE FROM backups WHERE id NOT IN (SELECT id FROM backups ORDER BY id DESC LIMIT 14)");
+    await client.query("COMMIT");
+    console.log("Scheduled staging snapshot completed; records:",records.rowCount);
+  }catch(err){
+    await client.query("ROLLBACK").catch(()=>{});
+    console.error("Scheduled staging snapshot failed:",err.message);
+  }finally{
+    if(locked)await client.query("SELECT pg_advisory_unlock(25370025)").catch(()=>{});
+    client.release();
+  }
+}
+app.get("/backup/status",(req,res)=>A(req,res,async()=>{
+  try{
+    const result=await Q("SELECT id,created_at,record_count FROM backups ORDER BY id DESC LIMIT 14");
+    res.json({snapshots_enabled:process.env.ENABLE_STAGING_SNAPSHOTS==="true",storage:"same_postgres_database_not_offsite",snapshots:result.rows});
+  }catch(e){res.status(503).json({error:"backup_status_unavailable"});}
+}));
+const PORT=Number(process.env.PORT)||10000;app.listen(PORT,"0.0.0.0",()=>console.log(`Greenair Invoice listening on ${PORT}`));init().then(()=>{console.log("Database initialised");scheduledSnapshot();setInterval(scheduledSnapshot,SNAPSHOT_INTERVAL_MS).unref();}).catch(e=>console.error("Database init error",e));
