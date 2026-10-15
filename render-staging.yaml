@@ -1,0 +1,26 @@
+# Greenair Invoice v2.5 isolated staging environment.
+# Apply this Blueprint only after checking its plan and database mapping in Render.
+# Do not point DATABASE_URL at the production greenair-invoice-db.
+services:
+  - type: web
+    name: greenair-invoice-v25-staging
+    runtime: node
+    plan: free
+    region: singapore
+    branch: greenair-invoice-v2-5-sync-staging
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeployTrigger: off
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false
+# The database already exists as greenair-invoice-v25-staging-db.
+# Configure DATABASE_URL using the private Internal Database URL from that
+# database's Render Connect page, never the production database URL.
+# On first launch, open /setup and create an independent staging admin account.
+# Do not use real business records or credentials for initial tests.
