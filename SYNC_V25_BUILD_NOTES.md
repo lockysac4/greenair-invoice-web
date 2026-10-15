@@ -20,3 +20,11 @@ This branch is isolated from main and **not deployed**.
 
 ## Status
 Prototype source committed; no deployment, no database changes, no Windows or Android sync client yet.
+
+## 2026-10-15 progress
+- Added `sync-v25-events.js` (commit 543d106): immutable sequence-based change feed, paginated snapshot, authenticated endpoints, transaction-scoped advisory lock and optimistic conflict detection.
+- This module is deliberately **not mounted** in the running server. No production data modified.
+- Important: Existing web routes write directly to `records`, so they do not yet append to `sync_events`. Add a database trigger or migrate all writers before clients can rely on the change feed.
+- Initial snapshot needs a consistent watermark and pagination protocol to prevent missed concurrent updates.
+- Record deletion, invoice number allocation, idempotent retries, device login, Android integration and Windows integration remain unimplemented.
+- Existing Render free PostgreSQL instance is set to expire 2026-11-05. Do not switch business invoicing to it until persistence and tested off-site backups are secured.
