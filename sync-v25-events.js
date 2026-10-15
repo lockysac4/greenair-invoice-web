@@ -43,7 +43,7 @@ function createSyncRouter(pool){
       const limit=Math.min(Math.max(parseInt(req.query.limit,10)||100,1),250);
       const r=await pool.query("SELECT sequence::text AS sequence,record_key,record_type,payload,revision FROM sync_events WHERE sequence>$1::bigint ORDER BY sequence LIMIT $2",[cursor,limit+1]);
       const page=r.rows.slice(0,limit);
-      res.json({changes:page,has_more:r.rows.length>limit,next_cursor:page.at(-1)?.sequence||cursor});
+      res.json({changes:page.map(x=>({...x,revision:revision(x.payload)})),has_more:r.rows.length>limit,next_cursor:page.at(-1)?.sequence||cursor});
     }catch(e){next(e);}
   });
   router.put("/record",async(req,res,next)=>{
