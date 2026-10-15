@@ -1,4 +1,5 @@
 -- STAGING ONLY. Do not apply to production before tested database snapshot.
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 -- Capture ALL writers to existing records table, including legacy web forms.
 CREATE TABLE IF NOT EXISTS sync_events (
  sequence BIGSERIAL PRIMARY KEY,
