@@ -136,6 +136,41 @@ async function scheduledSnapshot(){
     client.release();
   }
 }
+// Portable offsite export of a retained snapshot, with an integrity digest.
+// Download to a separate device or cloud drive; snapshots in this database are not offsite.
+app.get("/backup/download/:id",(req,res)=>A(req,res,async()=>{
+  try{
+    if(!/^[1-9][0-9]{0,17}$/.test(req.params.id))return res.status(400).send("Invalid snapshot ID");
+    const r=await Q("SELECT id,created_at,record_count,payload FROM backups WHERE id=$1",[req.params.id]);
+    if(!r.rowCount)return res.status(404).send("Snapshot not found");
+    const snapshot=r.rows[0],records=snapshot.payload||{};
+    if(!records||typeof records!=="object"||Array.isArray(records))throw Error("Invalid snapshot contents");
+    const keys=Object.keys(records).sort();
+    if(keys.length!==snapshot.record_count)throw Error("Snapshot record count mismatch");
+    const ordered=Object.fromEntries(keys.map(k=>[k,records[k]]));
+    const crypto=require("crypto");
+    const digest=crypto.createHash("sha256").update(JSON.stringify(ordered)).digest("hex");
+    const date=new Date(snapshot.created_at).toISOString().slice(0,10);
+    const exportData={SchemaVersion:2,ExportedUtc:new Date().toISOString(),SnapshotId:String(snapshot.id),SnapshotCreatedUtc:snapshot.created_at,RecordCount:keys.length,RecordsSha256:digest,Records:ordered};
+    res.set("Cache-Control","no-store");
+    res.set("X-Content-Type-Options","nosniff");
+    res.set("Content-Disposition",'attachment; filename="greenair-invoice-v25-snapshot-'+date+'-'+snapshot.id+'.json"');
+    res.type("application/json").send(JSON.stringify(exportData));
+  }catch(err){
+    console.error("snapshot export failed",err.message);
+    res.status(500).send("Snapshot integrity check failed or export unavailable");
+  }
+}));
+app.get("/backup/verify/:id",(req,res)=>A(req,res,async()=>{
+  try{
+    if(!/^[1-9][0-9]{0,17}$/.test(req.params.id))return res.status(400).json({ok:false,error:"invalid_snapshot_id"});
+    const r=await Q("SELECT id,record_count,payload FROM backups WHERE id=$1",[req.params.id]);
+    if(!r.rowCount)return res.status(404).json({ok:false,error:"snapshot_not_found"});
+    const snapshot=r.rows[0],data=snapshot.payload;
+    const valid=!!data&&typeof data==="object"&&!Array.isArray(data)&&Object.keys(data).length===snapshot.record_count;
+    res.set("Cache-Control","no-store").json({ok:valid,snapshot_id:String(snapshot.id),record_count:snapshot.record_count,storage:"same_database",restore_tested:false});
+  }catch(e){res.status(503).json({ok:false,error:"verification_unavailable"});}
+}));
 app.get("/backup/status",(req,res)=>A(req,res,async()=>{
   try{
     const result=await Q("SELECT id,created_at,record_count FROM backups ORDER BY id DESC LIMIT 14");
