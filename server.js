@@ -8,28 +8,8 @@ async function init(){
   await Q("create table if not exists backups(id bigserial primary key,created_at timestamptz default now(),record_count int not null,payload jsonb not null)");
   let n=(await Q("select count(*)::int n from app_users")).rows[0].n;
   if(!n&&process.env.ADMIN_EMAIL&&process.env.ADMIN_PASSWORD)await Q("insert into app_users(email,password_hash) values($1,$2)",[process.env.ADMIN_EMAIL.toLowerCase(),await bcrypt.hash(process.env.ADMIN_PASSWORD,12)]);
-  const invoiceKey="invoice:quote-Q-0004";
-  if(!(await Q("select 1 from records where record_key=$1",[invoiceKey])).rowCount){
-    let cr=(await Q("select record_key,payload from records where record_type='customer' and payload::text ilike $1 limit 1",["%shirley.buckley@stratco.com.au%"])).rows[0];
-    let customerKey,cv;
-    if(cr){customerKey=cr.record_key;cv=D(cr.payload)}
-    else{
-      customerKey="customer:shirley-buckley-stratco";
-      cv={Name:"Shirley Buckley",Email:"shirley.buckley@stratco.com.au",Address:"78 Esplanade, Middleton SA 5213"};
-      await Q("insert into records(record_key,record_type,payload) values($1,'customer',$2) on conflict(record_key) do nothing",[customerKey,{Id:"shirley-buckley-stratco",Key:customerKey,Type:"customer",Deleted:false,Json:JSON.stringify(cv)}]);
-    }
-    const invs=(await Q("select payload from records where record_type='invoice'")).rows.map(r=>D(r.payload));
-    const nums=invs.map(v=>String(v.Number||"").trim()).filter(x=>/^21\\d{3}$/.test(x)).map(Number);
-    const number=String(Math.max(21474,...nums)+1);
-    const items=[
-      {Product:"",Description:"On inspection found the unit out on fault due to driver board failure. Main PC board was corroded along with condenser and compressor. Recommend replacing the system.",Quantity:1,UnitPrice:0},
-      {Product:"Madimack Elite V4 Heat Pump",Description:"Madimack Elite V4 Heat Pump. High-efficiency pool heating and cooling system with 3-directional airflow, twin rotary compressor and low-noise construction.",Quantity:1,UnitPrice:8500},
-      {Product:"",Description:"Warranty: Parts - 7 years, Labor - 1 year, Heat Exchanger - 25 years",Quantity:1,UnitPrice:0},
-      {Product:"",Description:"Removal of old system and installation of new system",Quantity:1,UnitPrice:800}
-    ];
-    const v={Number:number,CustomerKey:customerKey,CustomerName:"Shirley Buckley",CustomerAddress:"78 Esplanade, Middleton SA 5213",CustomerEmail:"shirley.buckley@stratco.com.au",IssueDate:"2026-10-07",DueDate:"2026-10-07",Terms:"Due on receipt",CaseNo:"Astral Heat Pump Replacement",SourceQuote:"Q-0004",Items:items,Subtotal:9300,Gst:930,Total:10230,Status:"Draft"};
-    await Q("insert into records(record_key,record_type,payload) values($1,'invoice',$2)",[invoiceKey,{Id:"quote-Q-0004",Key:invoiceKey,Type:"invoice",Deleted:false,Json:JSON.stringify(v)}]);
-  }
+  // No automatic creation of sample or customer-specific invoices on startup.
+  // Import data only via explicit authenticated import after backup review.
 }
 function L(t,b,u){return `<!doctype html><html><head><meta name=viewport content="width=device-width,initial-scale=1"><title>${E(t)}</title><style>body{font-family:system-ui;margin:0;background:#f3f6f4;color:#17221c}header{background:#143b2a;color:#fff;padding:15px 22px;display:flex;gap:18px;flex-wrap:wrap}header a{color:#fff;text-decoration:none}.w{max-width:1180px;margin:auto;padding:22px}.c{background:#fff;padding:18px;border-radius:12px;margin-bottom:16px;box-shadow:0 1px 5px #0002}.g{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.m{font-size:30px;font-weight:700}input,button{padding:10px;border:1px solid #ccd2d8;border-radius:7px}button{background:#176b45;color:#fff;border:0}.scroll{overflow-x:auto}table{width:100%;border-collapse:collapse;min-width:760px}th,td{padding:9px;border-bottom:1px solid #ddd;text-align:left}small{color:#667}@media print{header,.noprint{display:none!important}.w{max-width:none;padding:0}.c{box-shadow:none}}.job{max-width:340px} @media(max-width:700px){.w{padding:14px}header{padding:12px 14px;gap:12px}.c{padding:12px}h1{font-size:32px}}</style></head><body>${u?'<header><b>Greenair Invoice</b><a href="/">Dashboard</a><a href="/r/customer">Customers</a><a href="/r/invoice">Invoices</a><a href="/r/payment">Payments</a><a href="/r/product">Products</a><a href="/backup">Backup / Import</a><a href="/logout">Logout</a></header>':""}<main class=w>${b}</main></body></html>`}
 app.get("/health",(req,res)=>res.json({ok:true}));
