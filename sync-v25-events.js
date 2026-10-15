@@ -69,7 +69,7 @@ function createSyncRouter(pool){
       }
       await client.query("INSERT INTO records(record_key,record_type,payload,updated_at) VALUES($1,$2,$3,now()) ON CONFLICT(record_key) DO UPDATE SET payload=EXCLUDED.payload,updated_at=now()",[b.record_key,b.record_type,b.payload]);
       const rev=revision(b.payload);
-      const e=await client.query("INSERT INTO sync_events(record_key,record_type,payload,revision) VALUES($1,$2,$3,$4) RETURNING sequence::text AS sequence",[b.record_key,b.record_type,b.payload,rev]);
+      const e=await client.query("SELECT currval(pg_get_serial_sequence('sync_events','sequence'))::text AS sequence");
       await client.query("COMMIT");
       res.json({ok:true,revision:rev,cursor:e.rows[0].sequence});
     }catch(e){if(client)await client.query("ROLLBACK").catch(()=>{});next(e);}
