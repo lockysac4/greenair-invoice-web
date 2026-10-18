@@ -608,7 +608,7 @@ app.get("/invoice/email/:id",(req,res)=>A(req,res,async()=>{
     const origin="https://greenair-invoice-v25-staging.onrender.com";
     const view=origin+"/invoice/shared/"+token;
     const subject="Greenair Tax Invoice "+(v.Number||"");
-    const body="Hi "+(v.CustomerName||"")+",\r\n\r\nPlease view your Greenair Tax Invoice "+(v.Number||"")+" here:\r\n"+view+"\r\n\r\nThis secure link expires in 30 days.\r\n\r\nThank you,\r\nGreenair";
+    const body=["Hi "+(v.CustomerName||"")+",","","Please view your Greenair Tax Invoice "+(v.Number||"")+" here:",view,"","This secure link expires in 30 days.","","Thank you,","Greenair"].join(String.fromCharCode(13,10))
     const mailto="mailto:"+encodeURIComponent(email)+"?subject="+encodeURIComponent(subject)+"&body="+encodeURIComponent(body);
     res.set("Cache-Control","no-store").send(L("Email Invoice",'<h1>Email invoice '+E(v.Number||"")+'</h1><div class=c><p><b>To:</b> '+E(email)+'</p><p>A private invoice link has been included in your email draft. It expires after 30 days. Anyone with the link can view this invoice, so only send it to the intended customer.</p><p><a href="'+E(mailto)+'" style="display:inline-block;background:#176b45;color:#fff;padding:13px 18px;border-radius:7px;text-decoration:none">Open email app</a></p><p><a href="'+E(view)+'" target="_blank" rel="noopener noreferrer">Test customer invoice link</a></p><p><a href="/invoice/view/'+encodeURIComponent(req.params.id)+'">Back to invoice</a></p><small>Check the recipient and press Send in your email app. No email has been sent automatically.</small></div>',req.session.user));
   }catch(e){
