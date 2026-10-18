@@ -80,39 +80,42 @@ app.post("/invoice/send/:id",(req,res)=>A(req,res,async()=>{
     res.status(502).send(L("Invoice email failed",'<h1>Invoice email failed</h1><div class=c>'+E(msg)+'</div><p><a href="/invoice/view/'+encodeURIComponent(req.params.id)+'">Back to invoice</a></p>',req.session.user));
   }
 }));
-// A random bearer link gives read-only access to one invoice, never to the dashboard.
+// Expiring read-only customer invoice links. Treat tokens as confidential.
 app.get("/invoice/shared/:token",async(req,res)=>{
   res.set("Cache-Control","no-store").set("Referrer-Policy","no-referrer").set("X-Robots-Tag","noindex, nofollow");
-  const token=req.params.token;
-  if(!/^[a-f0-9]{64}$/.test(token))return res.status(404).send("Invoice link unavailable");
+  if(!/^[a-f0-9]{64}$/.test(req.params.token))return res.status(404).send("Link unavailable");
   try{
-    const hash=require("crypto").createHash("sha256").update(token).digest("hex");
-    const r=await Q("SELECT records.payload FROM invoice_share_links JOIN records ON records.record_key=invoice_share_links.record_key WHERE token_hash=$1 AND expires_at>now() AND records.record_type='invoice'",[hash]);
-    if(!r.rowCount)return res.status(404).send("Invoice link expired or unavailable");
-    const v=D(r.rows[0].payload),items=Array.isArray(v.Items)?v.Items:[],money=x=>Number(x||0).toLocaleString("en-AU",{minimumFractionDigits:2,maximumFractionDigits:2}),total=Number(v.Total||0);
-    const rows=items.map(i=>'<tr><td>'+E(i.Description||i.Name||"")+'</td><td>'+E(i.Quantity||1)+'</td><td>
+    const hash=require("crypto").createHash("sha256").update(req.params.token).digest("hex");
+    const q=await Q("SELECT records.payload FROM invoice_share_links JOIN records ON records.record_key=invoice_share_links.record_key WHERE token_hash=$1 AND expires_at>now() AND records.record_type='invoice'",[hash]);
+    if(!q.rowCount)return res.status(404).send("Link expired or unavailable");
+    const v=D(q.rows[0].payload),money=n=>Number(n||0).toFixed(2),items=Array.isArray(v.Items)?v.Items:[];
+    const rows=items.map(i=>"<tr><td>"+E(i.Description||i.Name||"")+"</td><td>"+E(i.Quantity||1)+"</td><td>"+money(i.UnitPrice||i.Rate)+"</td></tr>").join("");
+    const html='<style>.paper{max-width:800px;margin:auto}.brand{background:#087b20;color:#fff;padding:16px;font-size:28px;font-weight:bold}@media print{*{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}}</style><div class="c paper"><div class=brand>GREENAIR</div><h1>Tax Invoice '+E(v.Number||"")+'</h1><p>Invoice to: '+E(v.CustomerName||"")+'</p><table><tr><th>Activity</th><th>Qty</th><th>Rate</th></tr>'+rows+'</table><h2>Total A$'+money(v.Total)+'</h2><p>Greenair, Adelaide SA</p><button onclick="window.print()">Print / Save PDF</button></div>';
+    res.send(L("Greenair Tax Invoice",html,false));
+  }catch(e){console.error("invoice share",e.message);res.status(503).send("Invoice unavailable");}
+});
+app.get("/invoice/email/:id",(req,res)=>A(req,res,async()=>{
   try{
     const key="invoice:"+req.params.id;
-    const r=(await Q("select payload from records where record_key=$1",[key])).rows[0];
-    if(!r)return res.status(404).send("Invoice not found");
-    const v=D(r.payload);
+    const r=await Q("SELECT payload FROM records WHERE record_key=$1 AND record_type='invoice'",[key]);
+    if(!r.rowCount)return res.status(404).send("Invoice not found");
+    const v=D(r.rows[0].payload);
     let email=v.CustomerEmail||v.Email||"";
     if(!email&&v.CustomerKey){
-      const c=(await Q("select payload from records where record_key=$1",[v.CustomerKey])).rows[0];
-      if(c)email=pick(D(c.payload),"Email","EmailAddress");
+      const c=await Q("SELECT payload FROM records WHERE record_key=$1",[v.CustomerKey]);
+      if(c.rowCount)email=pick(D(c.rows[0].payload),"Email","EmailAddress");
     }
-    if(!email)return res.status(400).send(L("No customer email",'<h1>No customer email</h1><div class=c>Add an email address to this customer before sending the invoice.</div><p><a href="/invoice/view/'+encodeURIComponent(req.params.id)+'">Back to invoice</a></p>',req.session.user));
-    // Use the OS email handler rather than Gmail's desktop compose URL.
-    // The invoice view requires authentication, so never send that private URL to customers.
+    if(!email)return res.status(400).send(L("Missing email",'<div class=c>Add a customer email first.</div>',req.session.user));
+    const crypto=require("crypto"),token=crypto.randomBytes(32).toString("hex");
+    const hash=crypto.createHash("sha256").update(token).digest("hex");
+    await Q("INSERT INTO invoice_share_links(token_hash,record_key,expires_at) VALUES($1,$2,now()+interval '30 days')",[hash,key]);
+    const view="https://greenair-invoice-v25-staging.onrender.com/invoice/shared/"+token;
     const subject="Greenair Tax Invoice "+(v.Number||"");
-    const body="Hi "+(v.CustomerName||"")+",\\r\\n\\r\\nPlease find your Greenair Tax Invoice "+(v.Number||"")+" attached.\\r\\n\\r\\nThank you,\\r\\nGreenair";
+    const body=["Hi "+(v.CustomerName||"")+",","","Your Greenair Tax Invoice "+(v.Number||"")+" is available here:",view,"","This link expires in 30 days.","","Thank you,","Greenair"].join(String.fromCharCode(13,10));
     const mailto="mailto:"+encodeURIComponent(email)+"?subject="+encodeURIComponent(subject)+"&body="+encodeURIComponent(body);
-    const back="/invoice/view/"+encodeURIComponent(req.params.id);
-    res.set("Cache-Control","no-store").send(L("Email Invoice",'<h1>Email invoice '+E(v.Number||"")+'</h1><div class=c><p><b>To:</b> '+E(email)+'</p><p>Save the invoice as a PDF using <b>Print / Save PDF</b> on the invoice page, then attach that PDF in your email app.</p><p><a href="'+E(mailto)+'" style="display:inline-block;background:#176b45;color:#fff;padding:13px 18px;border-radius:7px;text-decoration:none">Open email app</a></p><p><a href="'+back+'">Back to invoice / Save PDF</a></p><small>This opens a draft only. Check the attachment and press Send in your email app. No email has been sent automatically.</small></div>',req.session.user));
-  }catch(e){
-    console.error("gmail compose",e);
-    res.status(500).send(L("Email could not open",'<h1>Email could not open</h1><div class=c>'+E(e.message)+'</div>',req.session.user));
-  }
+    const html='<h1>Email invoice '+E(v.Number||"")+'</h1><div class=c><p>To: '+E(email)+'</p><p>The email draft includes a private invoice link. It expires after 30 days.</p><p><a href="'+E(mailto)+'">Open email app with invoice link</a></p><p><a href="'+E(view)+'" target="_blank" rel="noopener noreferrer">Test customer invoice link</a></p><p><a href="/invoice/view/'+encodeURIComponent(req.params.id)+'">Back to invoice</a></p><small>No email is sent until you press Send in your email app.</small></div>';
+    res.set("Cache-Control","no-store").send(L("Email invoice",html,req.session.user));
+  }catch(e){console.error("email draft",e.message);res.status(503).send(L("Email error",'<div class=c>Could not prepare the invoice email.</div>',req.session.user));}
 }));
 app.get("/invoice/view/:id",(req,res)=>A(req,res,async()=>{let key="invoice:"+req.params.id,r=(await Q("select payload from records where record_key=$1",[key])).rows[0];if(!r)return res.status(404).send("Invoice not found");let v=D(r.payload),items=Array.isArray(v.Items)?v.Items:[],money=n=>Number(n||0).toLocaleString("en-AU",{minimumFractionDigits:2,maximumFractionDigits:2}),date=x=>{let d=new Date(x);return isNaN(d)?"":d.toLocaleDateString("en-AU")};let total=Number(v.Total||0),subtotal=v.Subtotal!=null?Number(v.Subtotal):total/1.1,gst=v.Gst!=null?Number(v.Gst):total-subtotal;let rows=items.map(i=>`<tr><td>${E(i.Description||i.Name||"")}</td><td>${E(i.Quantity||1)}</td><td>${E(money(i.UnitPrice||i.Rate))}</td><td>${E(money(Number(i.Quantity||1)*Number(i.UnitPrice||i.Rate||0)))}</td></tr>`).join("");res.send(L("Invoice "+(v.Number||""),`<style>.inv{background:#fff;max-width:900px;margin:auto;padding:34px;color:#444}.green{color:#69ad45}.invtop{display:flex;justify-content:space-between;gap:30px}.brand{text-align:right;min-width:300px}.brand h1{font-size:30px;font-weight:400;margin:18px 0 0}.logoFix{width:280px;max-width:100%;box-sizing:border-box;background:linear-gradient(180deg,#075d12,#159a29 48%,#064d0e);border:3px solid #173c1d;color:#f1f1f1;font-family:Georgia,serif;font-size:38px;line-height:1;font-weight:700;letter-spacing:2px;text-align:center;padding:10px 12px;text-shadow:2px 2px 2px #222;white-space:nowrap;overflow:hidden}.bill{display:grid;grid-template-columns:1fr 1fr;gap:30px;margin:24px 0}.meta td{padding:3px 12px 3px 0;border:0}.items{width:100%;border-collapse:collapse}.items th{background:#e4f1dc;text-align:left;font-weight:400;padding:8px}.items td{padding:8px;border:0}.totals{margin:250px 0 55px auto;width:300px}.totals td{border:0;padding:5px}.balance{font-size:22px;color:#69ad45}.pay{background:#e4f1dc;padding:16px;display:flex;justify-content:space-between}.case{margin:25px 0}.actions{margin:18px auto;max-width:900px}@media(max-width:600px){.w{padding:8px}.inv{padding:16px;overflow:hidden}.invtop,.bill,.pay{display:block}.brand{text-align:left;margin-top:18px;min-width:0}.brand h1{margin-top:14px}.logoFix{width:100%;font-size:32px;letter-spacing:1px;padding:10px 8px}.brand img{margin-left:0!important;max-height:90px;object-fit:contain}.bill{margin-top:18px}.meta{width:100%;min-width:0!important;table-layout:fixed}.meta td{font-size:14px;overflow-wrap:anywhere}.items{width:100%!important;min-width:0!important;table-layout:fixed;font-size:11px}.items th,.items td{padding:6px 3px;overflow-wrap:anywhere}.items th:first-child,.items td:first-child{width:44%}.totals{margin-top:80px;width:100%;min-width:0}.pay{font-size:13px;overflow-wrap:anywhere}}@media print{@page{size:A4;margin:12mm}*,*::before,*::after{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}header,.actions{display:none!important}.inv{max-width:none;padding:12px}.w{max-width:none;padding:0}.logoFix{background:#087b20!important;color:#fff!important;border:3px solid #173c1d!important}.items th,.pay{background:#e4f1dc!important}.green,.balance{color:#69ad45!important}}</style><div class=inv><div class=invtop><div><b>Greenair</b><br>ABN 60202774371<br>Adelaide, SA<br>Locky 0412 395 325 | Brayden 0434 807 232<br>greenair.controls@gmail.com</div><div class=brand><div class="logoFix">GREENAIR</div><h1 class=green>Tax Invoice</h1></div></div><div class=bill><div><span class=green>INVOICE TO</span><br><br><b>${E(v.CustomerName||"")}</b><br>${E(v.CustomerAddress||v.Address||"")}</div><table class=meta><tr><td>INVOICE</td><td>${E(v.Number||"")}</td></tr><tr><td>DATE</td><td>${E(date(v.IssueDate))}</td></tr><tr><td>TERMS</td><td>${E(v.Terms||"Due on receipt")}</td></tr><tr><td>DUE DATE</td><td>${E(date(v.DueDate||v.IssueDate))}</td></tr></table></div><p><b>Email status:</b> ${E(v.EmailStatus||"Not sent")}${v.EmailSentUtc?" • Sent "+E(date(v.EmailSentUtc)):""}${v.EmailOpenedUtc?" • Opened "+E(new Date(v.EmailOpenedUtc).toLocaleString("en-AU")):""}</p><div class=case>CASE NO &nbsp;&nbsp;&nbsp;&nbsp; ${E(v.CaseNo||v.Job||v.Description||"")}</div><table class=items><tr><th>ACTIVITY</th><th>QTY</th><th>RATE</th><th>AMOUNT</th></tr>${rows}</table><table class=totals><tr><td>SUBTOTAL</td><td>${money(subtotal)}</td></tr><tr><td>GST TOTAL</td><td>${money(gst)}</td></tr><tr><td>TOTAL</td><td>${money(total)}</td></tr><tr class=balance><td>BALANCE DUE</td><td>A$${money(total)}</td></tr></table><div class=pay><div><b>BANK TRANSFER</b><br>Account: Lochlan Weeks<br>BSB: 062-692 &nbsp;&nbsp; Account: 83543903<br>Reference: ${E(v.Number||"")}</div><div class=green>PAYMENT</div></div></div><div class=actions><a href="/edit/invoice/${encodeURIComponent(req.params.id)}"><button>Edit Invoice</button></a> <button onclick="window.print()">Print / Save PDF</button> <a href="/invoice/email/${encodeURIComponent(req.params.id)}" target="_blank" rel="noopener"><button type=button>Email Invoice</button></a></div>`,req.session.user))}));
 app.get("/backup",(req,res)=>A(req,res,()=>res.send(L("Backup",'<h1>Backup & Migration</h1><div class=c><h2>Import Greenair v2 JSON</h2><form method=post action="/import" enctype="multipart/form-data"><input type=file name=backup accept=".json" required> <button>Import</button></form></div><div class=c><form method=post action="/snapshot"><button>Create server snapshot</button></form><p><a href="/export">Download current JSON export</a></p></div>',req.session.user))));
