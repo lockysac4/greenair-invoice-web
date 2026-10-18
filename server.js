@@ -125,7 +125,7 @@ app.get("/quote/shared/:token",async(req,res)=>{
     const hash=require("crypto").createHash("sha256").update(req.params.token).digest("hex");
     const q=await Q("SELECT records.payload FROM invoice_share_links JOIN records ON records.record_key=invoice_share_links.record_key WHERE token_hash=$1 AND expires_at>now() AND records.record_type='quote'",[hash]);
     if(!q.rowCount)return res.status(404).send("Link expired or unavailable");
-    renderGreenairQuote(res,D(q.rows[0].payload),"",false);
+    renderGreenairInvoice(res,D(q.rows[0].payload),"",false,"quote");
   }catch(e){console.error("quote share",e.message);res.status(503).send("Quote unavailable");}
 });
 app.get("/quote/email/:id",(req,res)=>A(req,res,async()=>{
