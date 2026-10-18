@@ -6,6 +6,7 @@ async function init(){
   await Q("create table if not exists app_users(id bigserial primary key,email text unique not null,password_hash text not null,role text not null default 'admin',created_at timestamptz default now())");
   await Q("create table if not exists records(record_key text primary key,record_type text not null,payload jsonb not null,updated_at timestamptz default now())");
   await Q("create table if not exists backups(id bigserial primary key,created_at timestamptz default now(),record_count int not null,payload jsonb not null)");
+  await Q("create table if not exists invoice_share_links(token_hash text primary key,record_key text not null references records(record_key),expires_at timestamptz not null,created_at timestamptz not null default now())");
   let n=(await Q("select count(*)::int n from app_users")).rows[0].n;
   if(!n&&process.env.ADMIN_EMAIL&&process.env.ADMIN_PASSWORD)await Q("insert into app_users(email,password_hash) values($1,$2)",[process.env.ADMIN_EMAIL.toLowerCase(),await bcrypt.hash(process.env.ADMIN_PASSWORD,12)]);
   // No automatic creation of sample or customer-specific invoices on startup.
@@ -79,7 +80,17 @@ app.post("/invoice/send/:id",(req,res)=>A(req,res,async()=>{
     res.status(502).send(L("Invoice email failed",'<h1>Invoice email failed</h1><div class=c>'+E(msg)+'</div><p><a href="/invoice/view/'+encodeURIComponent(req.params.id)+'">Back to invoice</a></p>',req.session.user));
   }
 }));
-app.get("/invoice/email/:id",(req,res)=>A(req,res,async()=>{
+// A random bearer link gives read-only access to one invoice, never to the dashboard.
+app.get("/invoice/shared/:token",async(req,res)=>{
+  res.set("Cache-Control","no-store").set("Referrer-Policy","no-referrer").set("X-Robots-Tag","noindex, nofollow");
+  const token=req.params.token;
+  if(!/^[a-f0-9]{64}$/.test(token))return res.status(404).send("Invoice link unavailable");
+  try{
+    const hash=require("crypto").createHash("sha256").update(token).digest("hex");
+    const r=await Q("SELECT records.payload FROM invoice_share_links JOIN records ON records.record_key=invoice_share_links.record_key WHERE token_hash=$1 AND expires_at>now() AND records.record_type='invoice'",[hash]);
+    if(!r.rowCount)return res.status(404).send("Invoice link expired or unavailable");
+    const v=D(r.rows[0].payload),items=Array.isArray(v.Items)?v.Items:[],money=x=>Number(x||0).toLocaleString("en-AU",{minimumFractionDigits:2,maximumFractionDigits:2}),total=Number(v.Total||0);
+    const rows=items.map(i=>'<tr><td>'+E(i.Description||i.Name||"")+'</td><td>'+E(i.Quantity||1)+'</td><td>
   try{
     const key="invoice:"+req.params.id;
     const r=(await Q("select payload from records where record_key=$1",[key])).rows[0];
@@ -98,6 +109,508 @@ app.get("/invoice/email/:id",(req,res)=>A(req,res,async()=>{
     const mailto="mailto:"+encodeURIComponent(email)+"?subject="+encodeURIComponent(subject)+"&body="+encodeURIComponent(body);
     const back="/invoice/view/"+encodeURIComponent(req.params.id);
     res.set("Cache-Control","no-store").send(L("Email Invoice",'<h1>Email invoice '+E(v.Number||"")+'</h1><div class=c><p><b>To:</b> '+E(email)+'</p><p>Save the invoice as a PDF using <b>Print / Save PDF</b> on the invoice page, then attach that PDF in your email app.</p><p><a href="'+E(mailto)+'" style="display:inline-block;background:#176b45;color:#fff;padding:13px 18px;border-radius:7px;text-decoration:none">Open email app</a></p><p><a href="'+back+'">Back to invoice / Save PDF</a></p><small>This opens a draft only. Check the attachment and press Send in your email app. No email has been sent automatically.</small></div>',req.session.user));
+  }catch(e){
+    console.error("gmail compose",e);
+    res.status(500).send(L("Email could not open",'<h1>Email could not open</h1><div class=c>'+E(e.message)+'</div>',req.session.user));
+  }
+}));
+app.get("/invoice/view/:id",(req,res)=>A(req,res,async()=>{let key="invoice:"+req.params.id,r=(await Q("select payload from records where record_key=$1",[key])).rows[0];if(!r)return res.status(404).send("Invoice not found");let v=D(r.payload),items=Array.isArray(v.Items)?v.Items:[],money=n=>Number(n||0).toLocaleString("en-AU",{minimumFractionDigits:2,maximumFractionDigits:2}),date=x=>{let d=new Date(x);return isNaN(d)?"":d.toLocaleDateString("en-AU")};let total=Number(v.Total||0),subtotal=v.Subtotal!=null?Number(v.Subtotal):total/1.1,gst=v.Gst!=null?Number(v.Gst):total-subtotal;let rows=items.map(i=>`<tr><td>${E(i.Description||i.Name||"")}</td><td>${E(i.Quantity||1)}</td><td>${E(money(i.UnitPrice||i.Rate))}</td><td>${E(money(Number(i.Quantity||1)*Number(i.UnitPrice||i.Rate||0)))}</td></tr>`).join("");res.send(L("Invoice "+(v.Number||""),`<style>.inv{background:#fff;max-width:900px;margin:auto;padding:34px;color:#444}.green{color:#69ad45}.invtop{display:flex;justify-content:space-between;gap:30px}.brand{text-align:right;min-width:300px}.brand h1{font-size:30px;font-weight:400;margin:18px 0 0}.logoFix{width:280px;max-width:100%;box-sizing:border-box;background:linear-gradient(180deg,#075d12,#159a29 48%,#064d0e);border:3px solid #173c1d;color:#f1f1f1;font-family:Georgia,serif;font-size:38px;line-height:1;font-weight:700;letter-spacing:2px;text-align:center;padding:10px 12px;text-shadow:2px 2px 2px #222;white-space:nowrap;overflow:hidden}.bill{display:grid;grid-template-columns:1fr 1fr;gap:30px;margin:24px 0}.meta td{padding:3px 12px 3px 0;border:0}.items{width:100%;border-collapse:collapse}.items th{background:#e4f1dc;text-align:left;font-weight:400;padding:8px}.items td{padding:8px;border:0}.totals{margin:250px 0 55px auto;width:300px}.totals td{border:0;padding:5px}.balance{font-size:22px;color:#69ad45}.pay{background:#e4f1dc;padding:16px;display:flex;justify-content:space-between}.case{margin:25px 0}.actions{margin:18px auto;max-width:900px}@media(max-width:600px){.w{padding:8px}.inv{padding:16px;overflow:hidden}.invtop,.bill,.pay{display:block}.brand{text-align:left;margin-top:18px;min-width:0}.brand h1{margin-top:14px}.logoFix{width:100%;font-size:32px;letter-spacing:1px;padding:10px 8px}.brand img{margin-left:0!important;max-height:90px;object-fit:contain}.bill{margin-top:18px}.meta{width:100%;min-width:0!important;table-layout:fixed}.meta td{font-size:14px;overflow-wrap:anywhere}.items{width:100%!important;min-width:0!important;table-layout:fixed;font-size:11px}.items th,.items td{padding:6px 3px;overflow-wrap:anywhere}.items th:first-child,.items td:first-child{width:44%}.totals{margin-top:80px;width:100%;min-width:0}.pay{font-size:13px;overflow-wrap:anywhere}}@media print{@page{size:A4;margin:12mm}*,*::before,*::after{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}header,.actions{display:none!important}.inv{max-width:none;padding:12px}.w{max-width:none;padding:0}.logoFix{background:#087b20!important;color:#fff!important;border:3px solid #173c1d!important}.items th,.pay{background:#e4f1dc!important}.green,.balance{color:#69ad45!important}}</style><div class=inv><div class=invtop><div><b>Greenair</b><br>ABN 60202774371<br>Adelaide, SA<br>Locky 0412 395 325 | Brayden 0434 807 232<br>greenair.controls@gmail.com</div><div class=brand><div class="logoFix">GREENAIR</div><h1 class=green>Tax Invoice</h1></div></div><div class=bill><div><span class=green>INVOICE TO</span><br><br><b>${E(v.CustomerName||"")}</b><br>${E(v.CustomerAddress||v.Address||"")}</div><table class=meta><tr><td>INVOICE</td><td>${E(v.Number||"")}</td></tr><tr><td>DATE</td><td>${E(date(v.IssueDate))}</td></tr><tr><td>TERMS</td><td>${E(v.Terms||"Due on receipt")}</td></tr><tr><td>DUE DATE</td><td>${E(date(v.DueDate||v.IssueDate))}</td></tr></table></div><p><b>Email status:</b> ${E(v.EmailStatus||"Not sent")}${v.EmailSentUtc?" • Sent "+E(date(v.EmailSentUtc)):""}${v.EmailOpenedUtc?" • Opened "+E(new Date(v.EmailOpenedUtc).toLocaleString("en-AU")):""}</p><div class=case>CASE NO &nbsp;&nbsp;&nbsp;&nbsp; ${E(v.CaseNo||v.Job||v.Description||"")}</div><table class=items><tr><th>ACTIVITY</th><th>QTY</th><th>RATE</th><th>AMOUNT</th></tr>${rows}</table><table class=totals><tr><td>SUBTOTAL</td><td>${money(subtotal)}</td></tr><tr><td>GST TOTAL</td><td>${money(gst)}</td></tr><tr><td>TOTAL</td><td>${money(total)}</td></tr><tr class=balance><td>BALANCE DUE</td><td>A$${money(total)}</td></tr></table><div class=pay><div><b>BANK TRANSFER</b><br>Account: Lochlan Weeks<br>BSB: 062-692 &nbsp;&nbsp; Account: 83543903<br>Reference: ${E(v.Number||"")}</div><div class=green>PAYMENT</div></div></div><div class=actions><a href="/edit/invoice/${encodeURIComponent(req.params.id)}"><button>Edit Invoice</button></a> <button onclick="window.print()">Print / Save PDF</button> <a href="/invoice/email/${encodeURIComponent(req.params.id)}" target="_blank" rel="noopener"><button type=button>Email Invoice</button></a></div>`,req.session.user))}));
+app.get("/backup",(req,res)=>A(req,res,()=>res.send(L("Backup",'<h1>Backup & Migration</h1><div class=c><h2>Import Greenair v2 JSON</h2><form method=post action="/import" enctype="multipart/form-data"><input type=file name=backup accept=".json" required> <button>Import</button></form></div><div class=c><form method=post action="/snapshot"><button>Create server snapshot</button></form><p><a href="/export">Download current JSON export</a></p></div>',req.session.user))));
+app.post("/import",upload.single("backup"),(req,res)=>A(req,res,async()=>{try{let d=JSON.parse(req.file.buffer.toString()),r=d.Records||d.records;if(!r)throw Error("No Records map found");let c=await pool.connect();try{await c.query("begin");for(let[k,v]of Object.entries(r)){let t=k.includes(":")?k.split(":")[0]:(v.Type||v.type||"unknown").toLowerCase();await c.query("insert into records(record_key,record_type,payload) values($1,$2,$3) on conflict(record_key) do update set record_type=excluded.record_type,payload=excluded.payload,updated_at=now()",[k,t,v])}await c.query("commit")}catch(e){await c.query("rollback");throw e}finally{c.release()}res.redirect("/")}catch(e){res.status(400).send(L("Import error",'<div class=c>'+E(e.message)+'</div>',req.session.user))}}));
+app.post("/snapshot",(req,res)=>A(req,res,async()=>{let r=(await Q("select record_key,payload from records")).rows,o=Object.fromEntries(r.map(x=>[x.record_key,x.payload]));await Q("insert into backups(record_count,payload) values($1,$2)",[r.length,o]);await Q("delete from backups where id not in(select id from backups order by id desc limit 50)");res.redirect("/backup")}));
+app.get("/export",(req,res)=>A(req,res,async()=>{let r=(await Q("select record_key,payload from records")).rows;res.setHeader("Content-Disposition",'attachment; filename="greenair-web-backup.json"');res.json({SchemaVersion:2,ExportedUtc:new Date().toISOString(),Records:Object.fromEntries(r.map(x=>[x.record_key,x.payload]))})}));
+// Staging-only scheduled database snapshots. These are NOT offsite disaster recovery.
+const SNAPSHOT_INTERVAL_MS=24*60*60*1000;
+async function scheduledSnapshot(){
+  if(process.env.ENABLE_STAGING_SNAPSHOTS!=="true")return;
+  const client=await pool.connect();
+  let locked=false;
+  try{
+    const lock=await client.query("SELECT pg_try_advisory_lock(25370025) AS locked");
+    locked=lock.rows[0].locked;
+    if(!locked)return;
+    await client.query("BEGIN");
+    const recent=await client.query("SELECT created_at FROM backups ORDER BY created_at DESC LIMIT 1");
+    if(recent.rows.length && Date.now()-new Date(recent.rows[0].created_at).getTime()<20*60*60*1000){
+      await client.query("COMMIT");return;
+    }
+    const records=await client.query("SELECT record_key,payload FROM records ORDER BY record_key");
+    const data=Object.fromEntries(records.rows.map(r=>[r.record_key,r.payload]));
+    await client.query("INSERT INTO backups(record_count,payload) VALUES($1,$2)",[records.rowCount,data]);
+    await client.query("DELETE FROM backups WHERE id NOT IN (SELECT id FROM backups ORDER BY id DESC LIMIT 14)");
+    await client.query("COMMIT");
+    console.log("Scheduled staging snapshot completed; records:",records.rowCount);
+  }catch(err){
+    await client.query("ROLLBACK").catch(()=>{});
+    console.error("Scheduled staging snapshot failed:",err.message);
+  }finally{
+    if(locked)await client.query("SELECT pg_advisory_unlock(25370025)").catch(()=>{});
+    client.release();
+  }
+}
+// Portable offsite export of a retained snapshot, with an integrity digest.
+// Download to a separate device or cloud drive; snapshots in this database are not offsite.
+app.get("/backup/download/:id",(req,res)=>A(req,res,async()=>{
+  try{
+    if(!/^[1-9][0-9]{0,17}$/.test(req.params.id))return res.status(400).send("Invalid snapshot ID");
+    const r=await Q("SELECT id,created_at,record_count,payload FROM backups WHERE id=$1",[req.params.id]);
+    if(!r.rowCount)return res.status(404).send("Snapshot not found");
+    const snapshot=r.rows[0],records=snapshot.payload||{};
+    if(!records||typeof records!=="object"||Array.isArray(records))throw Error("Invalid snapshot contents");
+    const keys=Object.keys(records).sort();
+    if(keys.length!==snapshot.record_count)throw Error("Snapshot record count mismatch");
+    const ordered=Object.fromEntries(keys.map(k=>[k,records[k]]));
+    const crypto=require("crypto");
+    const digest=crypto.createHash("sha256").update(JSON.stringify(ordered)).digest("hex");
+    const date=new Date(snapshot.created_at).toISOString().slice(0,10);
+    const exportData={SchemaVersion:2,ExportedUtc:new Date().toISOString(),SnapshotId:String(snapshot.id),SnapshotCreatedUtc:snapshot.created_at,RecordCount:keys.length,RecordsSha256:digest,Records:ordered};
+    res.set("Cache-Control","no-store");
+    res.set("X-Content-Type-Options","nosniff");
+    res.set("Content-Disposition",'attachment; filename="greenair-invoice-v25-snapshot-'+date+'-'+snapshot.id+'.json"');
+    res.type("application/json").send(JSON.stringify(exportData));
+  }catch(err){
+    console.error("snapshot export failed",err.message);
+    res.status(500).send("Snapshot integrity check failed or export unavailable");
+  }
+}));
+app.get("/backup/verify/:id",(req,res)=>A(req,res,async()=>{
+  try{
+    if(!/^[1-9][0-9]{0,17}$/.test(req.params.id))return res.status(400).json({ok:false,error:"invalid_snapshot_id"});
+    const r=await Q("SELECT id,record_count,payload FROM backups WHERE id=$1",[req.params.id]);
+    if(!r.rowCount)return res.status(404).json({ok:false,error:"snapshot_not_found"});
+    const snapshot=r.rows[0],data=snapshot.payload;
+    const valid=!!data&&typeof data==="object"&&!Array.isArray(data)&&Object.keys(data).length===snapshot.record_count;
+    res.set("Cache-Control","no-store").json({ok:valid,snapshot_id:String(snapshot.id),record_count:snapshot.record_count,storage:"same_database",restore_tested:false});
+  }catch(e){res.status(503).json({ok:false,error:"verification_unavailable"});}
+}));
+app.get("/backup/status",(req,res)=>A(req,res,async()=>{
+  try{
+    const result=await Q("SELECT id,created_at,record_count FROM backups ORDER BY id DESC LIMIT 14");
+    res.json({snapshots_enabled:process.env.ENABLE_STAGING_SNAPSHOTS==="true",storage:"same_postgres_database_not_offsite",snapshots:result.rows});
+  }catch(e){res.status(503).json({error:"backup_status_unavailable"});}
+}));
+const PORT=Number(process.env.PORT)||10000;app.listen(PORT,"0.0.0.0",()=>console.log(`Greenair Invoice listening on ${PORT}`));init().then(()=>{console.log("Database initialised");scheduledSnapshot();setInterval(scheduledSnapshot,SNAPSHOT_INTERVAL_MS).unref();}).catch(e=>console.error("Database init error",e));+money(i.UnitPrice||i.Rate)+'</td><td>
+  try{
+    const key="invoice:"+req.params.id;
+    const r=(await Q("select payload from records where record_key=$1",[key])).rows[0];
+    if(!r)return res.status(404).send("Invoice not found");
+    const v=D(r.payload);
+    let email=v.CustomerEmail||v.Email||"";
+    if(!email&&v.CustomerKey){
+      const c=(await Q("select payload from records where record_key=$1",[v.CustomerKey])).rows[0];
+      if(c)email=pick(D(c.payload),"Email","EmailAddress");
+    }
+    if(!email)return res.status(400).send(L("No customer email",'<h1>No customer email</h1><div class=c>Add an email address to this customer before sending the invoice.</div><p><a href="/invoice/view/'+encodeURIComponent(req.params.id)+'">Back to invoice</a></p>',req.session.user));
+    // Use the OS email handler rather than Gmail's desktop compose URL.
+    // The invoice view requires authentication, so never send that private URL to customers.
+    const subject="Greenair Tax Invoice "+(v.Number||"");
+    const body="Hi "+(v.CustomerName||"")+",\\r\\n\\r\\nPlease find your Greenair Tax Invoice "+(v.Number||"")+" attached.\\r\\n\\r\\nThank you,\\r\\nGreenair";
+    const mailto="mailto:"+encodeURIComponent(email)+"?subject="+encodeURIComponent(subject)+"&body="+encodeURIComponent(body);
+    const back="/invoice/view/"+encodeURIComponent(req.params.id);
+    res.set("Cache-Control","no-store").send(L("Email Invoice",'<h1>Email invoice '+E(v.Number||"")+'</h1><div class=c><p><b>To:</b> '+E(email)+'</p><p>Save the invoice as a PDF using <b>Print / Save PDF</b> on the invoice page, then attach that PDF in your email app.</p><p><a href="'+E(mailto)+'" style="display:inline-block;background:#176b45;color:#fff;padding:13px 18px;border-radius:7px;text-decoration:none">Open email app</a></p><p><a href="'+back+'">Back to invoice / Save PDF</a></p><small>This opens a draft only. Check the attachment and press Send in your email app. No email has been sent automatically.</small></div>',req.session.user));
+  }catch(e){
+    console.error("gmail compose",e);
+    res.status(500).send(L("Email could not open",'<h1>Email could not open</h1><div class=c>'+E(e.message)+'</div>',req.session.user));
+  }
+}));
+app.get("/invoice/view/:id",(req,res)=>A(req,res,async()=>{let key="invoice:"+req.params.id,r=(await Q("select payload from records where record_key=$1",[key])).rows[0];if(!r)return res.status(404).send("Invoice not found");let v=D(r.payload),items=Array.isArray(v.Items)?v.Items:[],money=n=>Number(n||0).toLocaleString("en-AU",{minimumFractionDigits:2,maximumFractionDigits:2}),date=x=>{let d=new Date(x);return isNaN(d)?"":d.toLocaleDateString("en-AU")};let total=Number(v.Total||0),subtotal=v.Subtotal!=null?Number(v.Subtotal):total/1.1,gst=v.Gst!=null?Number(v.Gst):total-subtotal;let rows=items.map(i=>`<tr><td>${E(i.Description||i.Name||"")}</td><td>${E(i.Quantity||1)}</td><td>${E(money(i.UnitPrice||i.Rate))}</td><td>${E(money(Number(i.Quantity||1)*Number(i.UnitPrice||i.Rate||0)))}</td></tr>`).join("");res.send(L("Invoice "+(v.Number||""),`<style>.inv{background:#fff;max-width:900px;margin:auto;padding:34px;color:#444}.green{color:#69ad45}.invtop{display:flex;justify-content:space-between;gap:30px}.brand{text-align:right;min-width:300px}.brand h1{font-size:30px;font-weight:400;margin:18px 0 0}.logoFix{width:280px;max-width:100%;box-sizing:border-box;background:linear-gradient(180deg,#075d12,#159a29 48%,#064d0e);border:3px solid #173c1d;color:#f1f1f1;font-family:Georgia,serif;font-size:38px;line-height:1;font-weight:700;letter-spacing:2px;text-align:center;padding:10px 12px;text-shadow:2px 2px 2px #222;white-space:nowrap;overflow:hidden}.bill{display:grid;grid-template-columns:1fr 1fr;gap:30px;margin:24px 0}.meta td{padding:3px 12px 3px 0;border:0}.items{width:100%;border-collapse:collapse}.items th{background:#e4f1dc;text-align:left;font-weight:400;padding:8px}.items td{padding:8px;border:0}.totals{margin:250px 0 55px auto;width:300px}.totals td{border:0;padding:5px}.balance{font-size:22px;color:#69ad45}.pay{background:#e4f1dc;padding:16px;display:flex;justify-content:space-between}.case{margin:25px 0}.actions{margin:18px auto;max-width:900px}@media(max-width:600px){.w{padding:8px}.inv{padding:16px;overflow:hidden}.invtop,.bill,.pay{display:block}.brand{text-align:left;margin-top:18px;min-width:0}.brand h1{margin-top:14px}.logoFix{width:100%;font-size:32px;letter-spacing:1px;padding:10px 8px}.brand img{margin-left:0!important;max-height:90px;object-fit:contain}.bill{margin-top:18px}.meta{width:100%;min-width:0!important;table-layout:fixed}.meta td{font-size:14px;overflow-wrap:anywhere}.items{width:100%!important;min-width:0!important;table-layout:fixed;font-size:11px}.items th,.items td{padding:6px 3px;overflow-wrap:anywhere}.items th:first-child,.items td:first-child{width:44%}.totals{margin-top:80px;width:100%;min-width:0}.pay{font-size:13px;overflow-wrap:anywhere}}@media print{@page{size:A4;margin:12mm}*,*::before,*::after{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}header,.actions{display:none!important}.inv{max-width:none;padding:12px}.w{max-width:none;padding:0}.logoFix{background:#087b20!important;color:#fff!important;border:3px solid #173c1d!important}.items th,.pay{background:#e4f1dc!important}.green,.balance{color:#69ad45!important}}</style><div class=inv><div class=invtop><div><b>Greenair</b><br>ABN 60202774371<br>Adelaide, SA<br>Locky 0412 395 325 | Brayden 0434 807 232<br>greenair.controls@gmail.com</div><div class=brand><div class="logoFix">GREENAIR</div><h1 class=green>Tax Invoice</h1></div></div><div class=bill><div><span class=green>INVOICE TO</span><br><br><b>${E(v.CustomerName||"")}</b><br>${E(v.CustomerAddress||v.Address||"")}</div><table class=meta><tr><td>INVOICE</td><td>${E(v.Number||"")}</td></tr><tr><td>DATE</td><td>${E(date(v.IssueDate))}</td></tr><tr><td>TERMS</td><td>${E(v.Terms||"Due on receipt")}</td></tr><tr><td>DUE DATE</td><td>${E(date(v.DueDate||v.IssueDate))}</td></tr></table></div><p><b>Email status:</b> ${E(v.EmailStatus||"Not sent")}${v.EmailSentUtc?" • Sent "+E(date(v.EmailSentUtc)):""}${v.EmailOpenedUtc?" • Opened "+E(new Date(v.EmailOpenedUtc).toLocaleString("en-AU")):""}</p><div class=case>CASE NO &nbsp;&nbsp;&nbsp;&nbsp; ${E(v.CaseNo||v.Job||v.Description||"")}</div><table class=items><tr><th>ACTIVITY</th><th>QTY</th><th>RATE</th><th>AMOUNT</th></tr>${rows}</table><table class=totals><tr><td>SUBTOTAL</td><td>${money(subtotal)}</td></tr><tr><td>GST TOTAL</td><td>${money(gst)}</td></tr><tr><td>TOTAL</td><td>${money(total)}</td></tr><tr class=balance><td>BALANCE DUE</td><td>A$${money(total)}</td></tr></table><div class=pay><div><b>BANK TRANSFER</b><br>Account: Lochlan Weeks<br>BSB: 062-692 &nbsp;&nbsp; Account: 83543903<br>Reference: ${E(v.Number||"")}</div><div class=green>PAYMENT</div></div></div><div class=actions><a href="/edit/invoice/${encodeURIComponent(req.params.id)}"><button>Edit Invoice</button></a> <button onclick="window.print()">Print / Save PDF</button> <a href="/invoice/email/${encodeURIComponent(req.params.id)}" target="_blank" rel="noopener"><button type=button>Email Invoice</button></a></div>`,req.session.user))}));
+app.get("/backup",(req,res)=>A(req,res,()=>res.send(L("Backup",'<h1>Backup & Migration</h1><div class=c><h2>Import Greenair v2 JSON</h2><form method=post action="/import" enctype="multipart/form-data"><input type=file name=backup accept=".json" required> <button>Import</button></form></div><div class=c><form method=post action="/snapshot"><button>Create server snapshot</button></form><p><a href="/export">Download current JSON export</a></p></div>',req.session.user))));
+app.post("/import",upload.single("backup"),(req,res)=>A(req,res,async()=>{try{let d=JSON.parse(req.file.buffer.toString()),r=d.Records||d.records;if(!r)throw Error("No Records map found");let c=await pool.connect();try{await c.query("begin");for(let[k,v]of Object.entries(r)){let t=k.includes(":")?k.split(":")[0]:(v.Type||v.type||"unknown").toLowerCase();await c.query("insert into records(record_key,record_type,payload) values($1,$2,$3) on conflict(record_key) do update set record_type=excluded.record_type,payload=excluded.payload,updated_at=now()",[k,t,v])}await c.query("commit")}catch(e){await c.query("rollback");throw e}finally{c.release()}res.redirect("/")}catch(e){res.status(400).send(L("Import error",'<div class=c>'+E(e.message)+'</div>',req.session.user))}}));
+app.post("/snapshot",(req,res)=>A(req,res,async()=>{let r=(await Q("select record_key,payload from records")).rows,o=Object.fromEntries(r.map(x=>[x.record_key,x.payload]));await Q("insert into backups(record_count,payload) values($1,$2)",[r.length,o]);await Q("delete from backups where id not in(select id from backups order by id desc limit 50)");res.redirect("/backup")}));
+app.get("/export",(req,res)=>A(req,res,async()=>{let r=(await Q("select record_key,payload from records")).rows;res.setHeader("Content-Disposition",'attachment; filename="greenair-web-backup.json"');res.json({SchemaVersion:2,ExportedUtc:new Date().toISOString(),Records:Object.fromEntries(r.map(x=>[x.record_key,x.payload]))})}));
+// Staging-only scheduled database snapshots. These are NOT offsite disaster recovery.
+const SNAPSHOT_INTERVAL_MS=24*60*60*1000;
+async function scheduledSnapshot(){
+  if(process.env.ENABLE_STAGING_SNAPSHOTS!=="true")return;
+  const client=await pool.connect();
+  let locked=false;
+  try{
+    const lock=await client.query("SELECT pg_try_advisory_lock(25370025) AS locked");
+    locked=lock.rows[0].locked;
+    if(!locked)return;
+    await client.query("BEGIN");
+    const recent=await client.query("SELECT created_at FROM backups ORDER BY created_at DESC LIMIT 1");
+    if(recent.rows.length && Date.now()-new Date(recent.rows[0].created_at).getTime()<20*60*60*1000){
+      await client.query("COMMIT");return;
+    }
+    const records=await client.query("SELECT record_key,payload FROM records ORDER BY record_key");
+    const data=Object.fromEntries(records.rows.map(r=>[r.record_key,r.payload]));
+    await client.query("INSERT INTO backups(record_count,payload) VALUES($1,$2)",[records.rowCount,data]);
+    await client.query("DELETE FROM backups WHERE id NOT IN (SELECT id FROM backups ORDER BY id DESC LIMIT 14)");
+    await client.query("COMMIT");
+    console.log("Scheduled staging snapshot completed; records:",records.rowCount);
+  }catch(err){
+    await client.query("ROLLBACK").catch(()=>{});
+    console.error("Scheduled staging snapshot failed:",err.message);
+  }finally{
+    if(locked)await client.query("SELECT pg_advisory_unlock(25370025)").catch(()=>{});
+    client.release();
+  }
+}
+// Portable offsite export of a retained snapshot, with an integrity digest.
+// Download to a separate device or cloud drive; snapshots in this database are not offsite.
+app.get("/backup/download/:id",(req,res)=>A(req,res,async()=>{
+  try{
+    if(!/^[1-9][0-9]{0,17}$/.test(req.params.id))return res.status(400).send("Invalid snapshot ID");
+    const r=await Q("SELECT id,created_at,record_count,payload FROM backups WHERE id=$1",[req.params.id]);
+    if(!r.rowCount)return res.status(404).send("Snapshot not found");
+    const snapshot=r.rows[0],records=snapshot.payload||{};
+    if(!records||typeof records!=="object"||Array.isArray(records))throw Error("Invalid snapshot contents");
+    const keys=Object.keys(records).sort();
+    if(keys.length!==snapshot.record_count)throw Error("Snapshot record count mismatch");
+    const ordered=Object.fromEntries(keys.map(k=>[k,records[k]]));
+    const crypto=require("crypto");
+    const digest=crypto.createHash("sha256").update(JSON.stringify(ordered)).digest("hex");
+    const date=new Date(snapshot.created_at).toISOString().slice(0,10);
+    const exportData={SchemaVersion:2,ExportedUtc:new Date().toISOString(),SnapshotId:String(snapshot.id),SnapshotCreatedUtc:snapshot.created_at,RecordCount:keys.length,RecordsSha256:digest,Records:ordered};
+    res.set("Cache-Control","no-store");
+    res.set("X-Content-Type-Options","nosniff");
+    res.set("Content-Disposition",'attachment; filename="greenair-invoice-v25-snapshot-'+date+'-'+snapshot.id+'.json"');
+    res.type("application/json").send(JSON.stringify(exportData));
+  }catch(err){
+    console.error("snapshot export failed",err.message);
+    res.status(500).send("Snapshot integrity check failed or export unavailable");
+  }
+}));
+app.get("/backup/verify/:id",(req,res)=>A(req,res,async()=>{
+  try{
+    if(!/^[1-9][0-9]{0,17}$/.test(req.params.id))return res.status(400).json({ok:false,error:"invalid_snapshot_id"});
+    const r=await Q("SELECT id,record_count,payload FROM backups WHERE id=$1",[req.params.id]);
+    if(!r.rowCount)return res.status(404).json({ok:false,error:"snapshot_not_found"});
+    const snapshot=r.rows[0],data=snapshot.payload;
+    const valid=!!data&&typeof data==="object"&&!Array.isArray(data)&&Object.keys(data).length===snapshot.record_count;
+    res.set("Cache-Control","no-store").json({ok:valid,snapshot_id:String(snapshot.id),record_count:snapshot.record_count,storage:"same_database",restore_tested:false});
+  }catch(e){res.status(503).json({ok:false,error:"verification_unavailable"});}
+}));
+app.get("/backup/status",(req,res)=>A(req,res,async()=>{
+  try{
+    const result=await Q("SELECT id,created_at,record_count FROM backups ORDER BY id DESC LIMIT 14");
+    res.json({snapshots_enabled:process.env.ENABLE_STAGING_SNAPSHOTS==="true",storage:"same_postgres_database_not_offsite",snapshots:result.rows});
+  }catch(e){res.status(503).json({error:"backup_status_unavailable"});}
+}));
+const PORT=Number(process.env.PORT)||10000;app.listen(PORT,"0.0.0.0",()=>console.log(`Greenair Invoice listening on ${PORT}`));init().then(()=>{console.log("Database initialised");scheduledSnapshot();setInterval(scheduledSnapshot,SNAPSHOT_INTERVAL_MS).unref();}).catch(e=>console.error("Database init error",e));+money(Number(i.Quantity||1)*Number(i.UnitPrice||i.Rate||0))+'</td></tr>').join("");
+    const body='<style>.invoice{max-width:760px;margin:auto}.logo{background:#087b20;color:white;padding:18px;font-size:30px;font-weight:bold;text-align:center}.invoice table{width:100%;border-collapse:collapse}.invoice th,.invoice td{padding:10px;border-bottom:1px solid #ddd;text-align:left}@media print{*{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}.noprint{display:none}}</style><div class="c invoice"><div class=logo>GREENAIR</div><h1>Tax Invoice '+E(v.Number||"")+'</h1><p><b>Invoice to:</b> '+E(v.CustomerName||"")+'</p><p><b>Date:</b> '+E(v.IssueDate?new Date(v.IssueDate).toLocaleDateString("en-AU"):"")+'</p><table><tr><th>Activity</th><th>Qty</th><th>Rate</th><th>Amount</th></tr>'+rows+'</table><p><b>Subtotal:</b> 
+  try{
+    const key="invoice:"+req.params.id;
+    const r=(await Q("select payload from records where record_key=$1",[key])).rows[0];
+    if(!r)return res.status(404).send("Invoice not found");
+    const v=D(r.payload);
+    let email=v.CustomerEmail||v.Email||"";
+    if(!email&&v.CustomerKey){
+      const c=(await Q("select payload from records where record_key=$1",[v.CustomerKey])).rows[0];
+      if(c)email=pick(D(c.payload),"Email","EmailAddress");
+    }
+    if(!email)return res.status(400).send(L("No customer email",'<h1>No customer email</h1><div class=c>Add an email address to this customer before sending the invoice.</div><p><a href="/invoice/view/'+encodeURIComponent(req.params.id)+'">Back to invoice</a></p>',req.session.user));
+    // Use the OS email handler rather than Gmail's desktop compose URL.
+    // The invoice view requires authentication, so never send that private URL to customers.
+    const subject="Greenair Tax Invoice "+(v.Number||"");
+    const body="Hi "+(v.CustomerName||"")+",\\r\\n\\r\\nPlease find your Greenair Tax Invoice "+(v.Number||"")+" attached.\\r\\n\\r\\nThank you,\\r\\nGreenair";
+    const mailto="mailto:"+encodeURIComponent(email)+"?subject="+encodeURIComponent(subject)+"&body="+encodeURIComponent(body);
+    const back="/invoice/view/"+encodeURIComponent(req.params.id);
+    res.set("Cache-Control","no-store").send(L("Email Invoice",'<h1>Email invoice '+E(v.Number||"")+'</h1><div class=c><p><b>To:</b> '+E(email)+'</p><p>Save the invoice as a PDF using <b>Print / Save PDF</b> on the invoice page, then attach that PDF in your email app.</p><p><a href="'+E(mailto)+'" style="display:inline-block;background:#176b45;color:#fff;padding:13px 18px;border-radius:7px;text-decoration:none">Open email app</a></p><p><a href="'+back+'">Back to invoice / Save PDF</a></p><small>This opens a draft only. Check the attachment and press Send in your email app. No email has been sent automatically.</small></div>',req.session.user));
+  }catch(e){
+    console.error("gmail compose",e);
+    res.status(500).send(L("Email could not open",'<h1>Email could not open</h1><div class=c>'+E(e.message)+'</div>',req.session.user));
+  }
+}));
+app.get("/invoice/view/:id",(req,res)=>A(req,res,async()=>{let key="invoice:"+req.params.id,r=(await Q("select payload from records where record_key=$1",[key])).rows[0];if(!r)return res.status(404).send("Invoice not found");let v=D(r.payload),items=Array.isArray(v.Items)?v.Items:[],money=n=>Number(n||0).toLocaleString("en-AU",{minimumFractionDigits:2,maximumFractionDigits:2}),date=x=>{let d=new Date(x);return isNaN(d)?"":d.toLocaleDateString("en-AU")};let total=Number(v.Total||0),subtotal=v.Subtotal!=null?Number(v.Subtotal):total/1.1,gst=v.Gst!=null?Number(v.Gst):total-subtotal;let rows=items.map(i=>`<tr><td>${E(i.Description||i.Name||"")}</td><td>${E(i.Quantity||1)}</td><td>${E(money(i.UnitPrice||i.Rate))}</td><td>${E(money(Number(i.Quantity||1)*Number(i.UnitPrice||i.Rate||0)))}</td></tr>`).join("");res.send(L("Invoice "+(v.Number||""),`<style>.inv{background:#fff;max-width:900px;margin:auto;padding:34px;color:#444}.green{color:#69ad45}.invtop{display:flex;justify-content:space-between;gap:30px}.brand{text-align:right;min-width:300px}.brand h1{font-size:30px;font-weight:400;margin:18px 0 0}.logoFix{width:280px;max-width:100%;box-sizing:border-box;background:linear-gradient(180deg,#075d12,#159a29 48%,#064d0e);border:3px solid #173c1d;color:#f1f1f1;font-family:Georgia,serif;font-size:38px;line-height:1;font-weight:700;letter-spacing:2px;text-align:center;padding:10px 12px;text-shadow:2px 2px 2px #222;white-space:nowrap;overflow:hidden}.bill{display:grid;grid-template-columns:1fr 1fr;gap:30px;margin:24px 0}.meta td{padding:3px 12px 3px 0;border:0}.items{width:100%;border-collapse:collapse}.items th{background:#e4f1dc;text-align:left;font-weight:400;padding:8px}.items td{padding:8px;border:0}.totals{margin:250px 0 55px auto;width:300px}.totals td{border:0;padding:5px}.balance{font-size:22px;color:#69ad45}.pay{background:#e4f1dc;padding:16px;display:flex;justify-content:space-between}.case{margin:25px 0}.actions{margin:18px auto;max-width:900px}@media(max-width:600px){.w{padding:8px}.inv{padding:16px;overflow:hidden}.invtop,.bill,.pay{display:block}.brand{text-align:left;margin-top:18px;min-width:0}.brand h1{margin-top:14px}.logoFix{width:100%;font-size:32px;letter-spacing:1px;padding:10px 8px}.brand img{margin-left:0!important;max-height:90px;object-fit:contain}.bill{margin-top:18px}.meta{width:100%;min-width:0!important;table-layout:fixed}.meta td{font-size:14px;overflow-wrap:anywhere}.items{width:100%!important;min-width:0!important;table-layout:fixed;font-size:11px}.items th,.items td{padding:6px 3px;overflow-wrap:anywhere}.items th:first-child,.items td:first-child{width:44%}.totals{margin-top:80px;width:100%;min-width:0}.pay{font-size:13px;overflow-wrap:anywhere}}@media print{@page{size:A4;margin:12mm}*,*::before,*::after{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}header,.actions{display:none!important}.inv{max-width:none;padding:12px}.w{max-width:none;padding:0}.logoFix{background:#087b20!important;color:#fff!important;border:3px solid #173c1d!important}.items th,.pay{background:#e4f1dc!important}.green,.balance{color:#69ad45!important}}</style><div class=inv><div class=invtop><div><b>Greenair</b><br>ABN 60202774371<br>Adelaide, SA<br>Locky 0412 395 325 | Brayden 0434 807 232<br>greenair.controls@gmail.com</div><div class=brand><div class="logoFix">GREENAIR</div><h1 class=green>Tax Invoice</h1></div></div><div class=bill><div><span class=green>INVOICE TO</span><br><br><b>${E(v.CustomerName||"")}</b><br>${E(v.CustomerAddress||v.Address||"")}</div><table class=meta><tr><td>INVOICE</td><td>${E(v.Number||"")}</td></tr><tr><td>DATE</td><td>${E(date(v.IssueDate))}</td></tr><tr><td>TERMS</td><td>${E(v.Terms||"Due on receipt")}</td></tr><tr><td>DUE DATE</td><td>${E(date(v.DueDate||v.IssueDate))}</td></tr></table></div><p><b>Email status:</b> ${E(v.EmailStatus||"Not sent")}${v.EmailSentUtc?" • Sent "+E(date(v.EmailSentUtc)):""}${v.EmailOpenedUtc?" • Opened "+E(new Date(v.EmailOpenedUtc).toLocaleString("en-AU")):""}</p><div class=case>CASE NO &nbsp;&nbsp;&nbsp;&nbsp; ${E(v.CaseNo||v.Job||v.Description||"")}</div><table class=items><tr><th>ACTIVITY</th><th>QTY</th><th>RATE</th><th>AMOUNT</th></tr>${rows}</table><table class=totals><tr><td>SUBTOTAL</td><td>${money(subtotal)}</td></tr><tr><td>GST TOTAL</td><td>${money(gst)}</td></tr><tr><td>TOTAL</td><td>${money(total)}</td></tr><tr class=balance><td>BALANCE DUE</td><td>A$${money(total)}</td></tr></table><div class=pay><div><b>BANK TRANSFER</b><br>Account: Lochlan Weeks<br>BSB: 062-692 &nbsp;&nbsp; Account: 83543903<br>Reference: ${E(v.Number||"")}</div><div class=green>PAYMENT</div></div></div><div class=actions><a href="/edit/invoice/${encodeURIComponent(req.params.id)}"><button>Edit Invoice</button></a> <button onclick="window.print()">Print / Save PDF</button> <a href="/invoice/email/${encodeURIComponent(req.params.id)}" target="_blank" rel="noopener"><button type=button>Email Invoice</button></a></div>`,req.session.user))}));
+app.get("/backup",(req,res)=>A(req,res,()=>res.send(L("Backup",'<h1>Backup & Migration</h1><div class=c><h2>Import Greenair v2 JSON</h2><form method=post action="/import" enctype="multipart/form-data"><input type=file name=backup accept=".json" required> <button>Import</button></form></div><div class=c><form method=post action="/snapshot"><button>Create server snapshot</button></form><p><a href="/export">Download current JSON export</a></p></div>',req.session.user))));
+app.post("/import",upload.single("backup"),(req,res)=>A(req,res,async()=>{try{let d=JSON.parse(req.file.buffer.toString()),r=d.Records||d.records;if(!r)throw Error("No Records map found");let c=await pool.connect();try{await c.query("begin");for(let[k,v]of Object.entries(r)){let t=k.includes(":")?k.split(":")[0]:(v.Type||v.type||"unknown").toLowerCase();await c.query("insert into records(record_key,record_type,payload) values($1,$2,$3) on conflict(record_key) do update set record_type=excluded.record_type,payload=excluded.payload,updated_at=now()",[k,t,v])}await c.query("commit")}catch(e){await c.query("rollback");throw e}finally{c.release()}res.redirect("/")}catch(e){res.status(400).send(L("Import error",'<div class=c>'+E(e.message)+'</div>',req.session.user))}}));
+app.post("/snapshot",(req,res)=>A(req,res,async()=>{let r=(await Q("select record_key,payload from records")).rows,o=Object.fromEntries(r.map(x=>[x.record_key,x.payload]));await Q("insert into backups(record_count,payload) values($1,$2)",[r.length,o]);await Q("delete from backups where id not in(select id from backups order by id desc limit 50)");res.redirect("/backup")}));
+app.get("/export",(req,res)=>A(req,res,async()=>{let r=(await Q("select record_key,payload from records")).rows;res.setHeader("Content-Disposition",'attachment; filename="greenair-web-backup.json"');res.json({SchemaVersion:2,ExportedUtc:new Date().toISOString(),Records:Object.fromEntries(r.map(x=>[x.record_key,x.payload]))})}));
+// Staging-only scheduled database snapshots. These are NOT offsite disaster recovery.
+const SNAPSHOT_INTERVAL_MS=24*60*60*1000;
+async function scheduledSnapshot(){
+  if(process.env.ENABLE_STAGING_SNAPSHOTS!=="true")return;
+  const client=await pool.connect();
+  let locked=false;
+  try{
+    const lock=await client.query("SELECT pg_try_advisory_lock(25370025) AS locked");
+    locked=lock.rows[0].locked;
+    if(!locked)return;
+    await client.query("BEGIN");
+    const recent=await client.query("SELECT created_at FROM backups ORDER BY created_at DESC LIMIT 1");
+    if(recent.rows.length && Date.now()-new Date(recent.rows[0].created_at).getTime()<20*60*60*1000){
+      await client.query("COMMIT");return;
+    }
+    const records=await client.query("SELECT record_key,payload FROM records ORDER BY record_key");
+    const data=Object.fromEntries(records.rows.map(r=>[r.record_key,r.payload]));
+    await client.query("INSERT INTO backups(record_count,payload) VALUES($1,$2)",[records.rowCount,data]);
+    await client.query("DELETE FROM backups WHERE id NOT IN (SELECT id FROM backups ORDER BY id DESC LIMIT 14)");
+    await client.query("COMMIT");
+    console.log("Scheduled staging snapshot completed; records:",records.rowCount);
+  }catch(err){
+    await client.query("ROLLBACK").catch(()=>{});
+    console.error("Scheduled staging snapshot failed:",err.message);
+  }finally{
+    if(locked)await client.query("SELECT pg_advisory_unlock(25370025)").catch(()=>{});
+    client.release();
+  }
+}
+// Portable offsite export of a retained snapshot, with an integrity digest.
+// Download to a separate device or cloud drive; snapshots in this database are not offsite.
+app.get("/backup/download/:id",(req,res)=>A(req,res,async()=>{
+  try{
+    if(!/^[1-9][0-9]{0,17}$/.test(req.params.id))return res.status(400).send("Invalid snapshot ID");
+    const r=await Q("SELECT id,created_at,record_count,payload FROM backups WHERE id=$1",[req.params.id]);
+    if(!r.rowCount)return res.status(404).send("Snapshot not found");
+    const snapshot=r.rows[0],records=snapshot.payload||{};
+    if(!records||typeof records!=="object"||Array.isArray(records))throw Error("Invalid snapshot contents");
+    const keys=Object.keys(records).sort();
+    if(keys.length!==snapshot.record_count)throw Error("Snapshot record count mismatch");
+    const ordered=Object.fromEntries(keys.map(k=>[k,records[k]]));
+    const crypto=require("crypto");
+    const digest=crypto.createHash("sha256").update(JSON.stringify(ordered)).digest("hex");
+    const date=new Date(snapshot.created_at).toISOString().slice(0,10);
+    const exportData={SchemaVersion:2,ExportedUtc:new Date().toISOString(),SnapshotId:String(snapshot.id),SnapshotCreatedUtc:snapshot.created_at,RecordCount:keys.length,RecordsSha256:digest,Records:ordered};
+    res.set("Cache-Control","no-store");
+    res.set("X-Content-Type-Options","nosniff");
+    res.set("Content-Disposition",'attachment; filename="greenair-invoice-v25-snapshot-'+date+'-'+snapshot.id+'.json"');
+    res.type("application/json").send(JSON.stringify(exportData));
+  }catch(err){
+    console.error("snapshot export failed",err.message);
+    res.status(500).send("Snapshot integrity check failed or export unavailable");
+  }
+}));
+app.get("/backup/verify/:id",(req,res)=>A(req,res,async()=>{
+  try{
+    if(!/^[1-9][0-9]{0,17}$/.test(req.params.id))return res.status(400).json({ok:false,error:"invalid_snapshot_id"});
+    const r=await Q("SELECT id,record_count,payload FROM backups WHERE id=$1",[req.params.id]);
+    if(!r.rowCount)return res.status(404).json({ok:false,error:"snapshot_not_found"});
+    const snapshot=r.rows[0],data=snapshot.payload;
+    const valid=!!data&&typeof data==="object"&&!Array.isArray(data)&&Object.keys(data).length===snapshot.record_count;
+    res.set("Cache-Control","no-store").json({ok:valid,snapshot_id:String(snapshot.id),record_count:snapshot.record_count,storage:"same_database",restore_tested:false});
+  }catch(e){res.status(503).json({ok:false,error:"verification_unavailable"});}
+}));
+app.get("/backup/status",(req,res)=>A(req,res,async()=>{
+  try{
+    const result=await Q("SELECT id,created_at,record_count FROM backups ORDER BY id DESC LIMIT 14");
+    res.json({snapshots_enabled:process.env.ENABLE_STAGING_SNAPSHOTS==="true",storage:"same_postgres_database_not_offsite",snapshots:result.rows});
+  }catch(e){res.status(503).json({error:"backup_status_unavailable"});}
+}));
+const PORT=Number(process.env.PORT)||10000;app.listen(PORT,"0.0.0.0",()=>console.log(`Greenair Invoice listening on ${PORT}`));init().then(()=>{console.log("Database initialised");scheduledSnapshot();setInterval(scheduledSnapshot,SNAPSHOT_INTERVAL_MS).unref();}).catch(e=>console.error("Database init error",e));+money(v.Subtotal!=null?v.Subtotal:total/1.1)+'</p><p><b>GST:</b> 
+  try{
+    const key="invoice:"+req.params.id;
+    const r=(await Q("select payload from records where record_key=$1",[key])).rows[0];
+    if(!r)return res.status(404).send("Invoice not found");
+    const v=D(r.payload);
+    let email=v.CustomerEmail||v.Email||"";
+    if(!email&&v.CustomerKey){
+      const c=(await Q("select payload from records where record_key=$1",[v.CustomerKey])).rows[0];
+      if(c)email=pick(D(c.payload),"Email","EmailAddress");
+    }
+    if(!email)return res.status(400).send(L("No customer email",'<h1>No customer email</h1><div class=c>Add an email address to this customer before sending the invoice.</div><p><a href="/invoice/view/'+encodeURIComponent(req.params.id)+'">Back to invoice</a></p>',req.session.user));
+    // Use the OS email handler rather than Gmail's desktop compose URL.
+    // The invoice view requires authentication, so never send that private URL to customers.
+    const subject="Greenair Tax Invoice "+(v.Number||"");
+    const body="Hi "+(v.CustomerName||"")+",\\r\\n\\r\\nPlease find your Greenair Tax Invoice "+(v.Number||"")+" attached.\\r\\n\\r\\nThank you,\\r\\nGreenair";
+    const mailto="mailto:"+encodeURIComponent(email)+"?subject="+encodeURIComponent(subject)+"&body="+encodeURIComponent(body);
+    const back="/invoice/view/"+encodeURIComponent(req.params.id);
+    res.set("Cache-Control","no-store").send(L("Email Invoice",'<h1>Email invoice '+E(v.Number||"")+'</h1><div class=c><p><b>To:</b> '+E(email)+'</p><p>Save the invoice as a PDF using <b>Print / Save PDF</b> on the invoice page, then attach that PDF in your email app.</p><p><a href="'+E(mailto)+'" style="display:inline-block;background:#176b45;color:#fff;padding:13px 18px;border-radius:7px;text-decoration:none">Open email app</a></p><p><a href="'+back+'">Back to invoice / Save PDF</a></p><small>This opens a draft only. Check the attachment and press Send in your email app. No email has been sent automatically.</small></div>',req.session.user));
+  }catch(e){
+    console.error("gmail compose",e);
+    res.status(500).send(L("Email could not open",'<h1>Email could not open</h1><div class=c>'+E(e.message)+'</div>',req.session.user));
+  }
+}));
+app.get("/invoice/view/:id",(req,res)=>A(req,res,async()=>{let key="invoice:"+req.params.id,r=(await Q("select payload from records where record_key=$1",[key])).rows[0];if(!r)return res.status(404).send("Invoice not found");let v=D(r.payload),items=Array.isArray(v.Items)?v.Items:[],money=n=>Number(n||0).toLocaleString("en-AU",{minimumFractionDigits:2,maximumFractionDigits:2}),date=x=>{let d=new Date(x);return isNaN(d)?"":d.toLocaleDateString("en-AU")};let total=Number(v.Total||0),subtotal=v.Subtotal!=null?Number(v.Subtotal):total/1.1,gst=v.Gst!=null?Number(v.Gst):total-subtotal;let rows=items.map(i=>`<tr><td>${E(i.Description||i.Name||"")}</td><td>${E(i.Quantity||1)}</td><td>${E(money(i.UnitPrice||i.Rate))}</td><td>${E(money(Number(i.Quantity||1)*Number(i.UnitPrice||i.Rate||0)))}</td></tr>`).join("");res.send(L("Invoice "+(v.Number||""),`<style>.inv{background:#fff;max-width:900px;margin:auto;padding:34px;color:#444}.green{color:#69ad45}.invtop{display:flex;justify-content:space-between;gap:30px}.brand{text-align:right;min-width:300px}.brand h1{font-size:30px;font-weight:400;margin:18px 0 0}.logoFix{width:280px;max-width:100%;box-sizing:border-box;background:linear-gradient(180deg,#075d12,#159a29 48%,#064d0e);border:3px solid #173c1d;color:#f1f1f1;font-family:Georgia,serif;font-size:38px;line-height:1;font-weight:700;letter-spacing:2px;text-align:center;padding:10px 12px;text-shadow:2px 2px 2px #222;white-space:nowrap;overflow:hidden}.bill{display:grid;grid-template-columns:1fr 1fr;gap:30px;margin:24px 0}.meta td{padding:3px 12px 3px 0;border:0}.items{width:100%;border-collapse:collapse}.items th{background:#e4f1dc;text-align:left;font-weight:400;padding:8px}.items td{padding:8px;border:0}.totals{margin:250px 0 55px auto;width:300px}.totals td{border:0;padding:5px}.balance{font-size:22px;color:#69ad45}.pay{background:#e4f1dc;padding:16px;display:flex;justify-content:space-between}.case{margin:25px 0}.actions{margin:18px auto;max-width:900px}@media(max-width:600px){.w{padding:8px}.inv{padding:16px;overflow:hidden}.invtop,.bill,.pay{display:block}.brand{text-align:left;margin-top:18px;min-width:0}.brand h1{margin-top:14px}.logoFix{width:100%;font-size:32px;letter-spacing:1px;padding:10px 8px}.brand img{margin-left:0!important;max-height:90px;object-fit:contain}.bill{margin-top:18px}.meta{width:100%;min-width:0!important;table-layout:fixed}.meta td{font-size:14px;overflow-wrap:anywhere}.items{width:100%!important;min-width:0!important;table-layout:fixed;font-size:11px}.items th,.items td{padding:6px 3px;overflow-wrap:anywhere}.items th:first-child,.items td:first-child{width:44%}.totals{margin-top:80px;width:100%;min-width:0}.pay{font-size:13px;overflow-wrap:anywhere}}@media print{@page{size:A4;margin:12mm}*,*::before,*::after{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}header,.actions{display:none!important}.inv{max-width:none;padding:12px}.w{max-width:none;padding:0}.logoFix{background:#087b20!important;color:#fff!important;border:3px solid #173c1d!important}.items th,.pay{background:#e4f1dc!important}.green,.balance{color:#69ad45!important}}</style><div class=inv><div class=invtop><div><b>Greenair</b><br>ABN 60202774371<br>Adelaide, SA<br>Locky 0412 395 325 | Brayden 0434 807 232<br>greenair.controls@gmail.com</div><div class=brand><div class="logoFix">GREENAIR</div><h1 class=green>Tax Invoice</h1></div></div><div class=bill><div><span class=green>INVOICE TO</span><br><br><b>${E(v.CustomerName||"")}</b><br>${E(v.CustomerAddress||v.Address||"")}</div><table class=meta><tr><td>INVOICE</td><td>${E(v.Number||"")}</td></tr><tr><td>DATE</td><td>${E(date(v.IssueDate))}</td></tr><tr><td>TERMS</td><td>${E(v.Terms||"Due on receipt")}</td></tr><tr><td>DUE DATE</td><td>${E(date(v.DueDate||v.IssueDate))}</td></tr></table></div><p><b>Email status:</b> ${E(v.EmailStatus||"Not sent")}${v.EmailSentUtc?" • Sent "+E(date(v.EmailSentUtc)):""}${v.EmailOpenedUtc?" • Opened "+E(new Date(v.EmailOpenedUtc).toLocaleString("en-AU")):""}</p><div class=case>CASE NO &nbsp;&nbsp;&nbsp;&nbsp; ${E(v.CaseNo||v.Job||v.Description||"")}</div><table class=items><tr><th>ACTIVITY</th><th>QTY</th><th>RATE</th><th>AMOUNT</th></tr>${rows}</table><table class=totals><tr><td>SUBTOTAL</td><td>${money(subtotal)}</td></tr><tr><td>GST TOTAL</td><td>${money(gst)}</td></tr><tr><td>TOTAL</td><td>${money(total)}</td></tr><tr class=balance><td>BALANCE DUE</td><td>A$${money(total)}</td></tr></table><div class=pay><div><b>BANK TRANSFER</b><br>Account: Lochlan Weeks<br>BSB: 062-692 &nbsp;&nbsp; Account: 83543903<br>Reference: ${E(v.Number||"")}</div><div class=green>PAYMENT</div></div></div><div class=actions><a href="/edit/invoice/${encodeURIComponent(req.params.id)}"><button>Edit Invoice</button></a> <button onclick="window.print()">Print / Save PDF</button> <a href="/invoice/email/${encodeURIComponent(req.params.id)}" target="_blank" rel="noopener"><button type=button>Email Invoice</button></a></div>`,req.session.user))}));
+app.get("/backup",(req,res)=>A(req,res,()=>res.send(L("Backup",'<h1>Backup & Migration</h1><div class=c><h2>Import Greenair v2 JSON</h2><form method=post action="/import" enctype="multipart/form-data"><input type=file name=backup accept=".json" required> <button>Import</button></form></div><div class=c><form method=post action="/snapshot"><button>Create server snapshot</button></form><p><a href="/export">Download current JSON export</a></p></div>',req.session.user))));
+app.post("/import",upload.single("backup"),(req,res)=>A(req,res,async()=>{try{let d=JSON.parse(req.file.buffer.toString()),r=d.Records||d.records;if(!r)throw Error("No Records map found");let c=await pool.connect();try{await c.query("begin");for(let[k,v]of Object.entries(r)){let t=k.includes(":")?k.split(":")[0]:(v.Type||v.type||"unknown").toLowerCase();await c.query("insert into records(record_key,record_type,payload) values($1,$2,$3) on conflict(record_key) do update set record_type=excluded.record_type,payload=excluded.payload,updated_at=now()",[k,t,v])}await c.query("commit")}catch(e){await c.query("rollback");throw e}finally{c.release()}res.redirect("/")}catch(e){res.status(400).send(L("Import error",'<div class=c>'+E(e.message)+'</div>',req.session.user))}}));
+app.post("/snapshot",(req,res)=>A(req,res,async()=>{let r=(await Q("select record_key,payload from records")).rows,o=Object.fromEntries(r.map(x=>[x.record_key,x.payload]));await Q("insert into backups(record_count,payload) values($1,$2)",[r.length,o]);await Q("delete from backups where id not in(select id from backups order by id desc limit 50)");res.redirect("/backup")}));
+app.get("/export",(req,res)=>A(req,res,async()=>{let r=(await Q("select record_key,payload from records")).rows;res.setHeader("Content-Disposition",'attachment; filename="greenair-web-backup.json"');res.json({SchemaVersion:2,ExportedUtc:new Date().toISOString(),Records:Object.fromEntries(r.map(x=>[x.record_key,x.payload]))})}));
+// Staging-only scheduled database snapshots. These are NOT offsite disaster recovery.
+const SNAPSHOT_INTERVAL_MS=24*60*60*1000;
+async function scheduledSnapshot(){
+  if(process.env.ENABLE_STAGING_SNAPSHOTS!=="true")return;
+  const client=await pool.connect();
+  let locked=false;
+  try{
+    const lock=await client.query("SELECT pg_try_advisory_lock(25370025) AS locked");
+    locked=lock.rows[0].locked;
+    if(!locked)return;
+    await client.query("BEGIN");
+    const recent=await client.query("SELECT created_at FROM backups ORDER BY created_at DESC LIMIT 1");
+    if(recent.rows.length && Date.now()-new Date(recent.rows[0].created_at).getTime()<20*60*60*1000){
+      await client.query("COMMIT");return;
+    }
+    const records=await client.query("SELECT record_key,payload FROM records ORDER BY record_key");
+    const data=Object.fromEntries(records.rows.map(r=>[r.record_key,r.payload]));
+    await client.query("INSERT INTO backups(record_count,payload) VALUES($1,$2)",[records.rowCount,data]);
+    await client.query("DELETE FROM backups WHERE id NOT IN (SELECT id FROM backups ORDER BY id DESC LIMIT 14)");
+    await client.query("COMMIT");
+    console.log("Scheduled staging snapshot completed; records:",records.rowCount);
+  }catch(err){
+    await client.query("ROLLBACK").catch(()=>{});
+    console.error("Scheduled staging snapshot failed:",err.message);
+  }finally{
+    if(locked)await client.query("SELECT pg_advisory_unlock(25370025)").catch(()=>{});
+    client.release();
+  }
+}
+// Portable offsite export of a retained snapshot, with an integrity digest.
+// Download to a separate device or cloud drive; snapshots in this database are not offsite.
+app.get("/backup/download/:id",(req,res)=>A(req,res,async()=>{
+  try{
+    if(!/^[1-9][0-9]{0,17}$/.test(req.params.id))return res.status(400).send("Invalid snapshot ID");
+    const r=await Q("SELECT id,created_at,record_count,payload FROM backups WHERE id=$1",[req.params.id]);
+    if(!r.rowCount)return res.status(404).send("Snapshot not found");
+    const snapshot=r.rows[0],records=snapshot.payload||{};
+    if(!records||typeof records!=="object"||Array.isArray(records))throw Error("Invalid snapshot contents");
+    const keys=Object.keys(records).sort();
+    if(keys.length!==snapshot.record_count)throw Error("Snapshot record count mismatch");
+    const ordered=Object.fromEntries(keys.map(k=>[k,records[k]]));
+    const crypto=require("crypto");
+    const digest=crypto.createHash("sha256").update(JSON.stringify(ordered)).digest("hex");
+    const date=new Date(snapshot.created_at).toISOString().slice(0,10);
+    const exportData={SchemaVersion:2,ExportedUtc:new Date().toISOString(),SnapshotId:String(snapshot.id),SnapshotCreatedUtc:snapshot.created_at,RecordCount:keys.length,RecordsSha256:digest,Records:ordered};
+    res.set("Cache-Control","no-store");
+    res.set("X-Content-Type-Options","nosniff");
+    res.set("Content-Disposition",'attachment; filename="greenair-invoice-v25-snapshot-'+date+'-'+snapshot.id+'.json"');
+    res.type("application/json").send(JSON.stringify(exportData));
+  }catch(err){
+    console.error("snapshot export failed",err.message);
+    res.status(500).send("Snapshot integrity check failed or export unavailable");
+  }
+}));
+app.get("/backup/verify/:id",(req,res)=>A(req,res,async()=>{
+  try{
+    if(!/^[1-9][0-9]{0,17}$/.test(req.params.id))return res.status(400).json({ok:false,error:"invalid_snapshot_id"});
+    const r=await Q("SELECT id,record_count,payload FROM backups WHERE id=$1",[req.params.id]);
+    if(!r.rowCount)return res.status(404).json({ok:false,error:"snapshot_not_found"});
+    const snapshot=r.rows[0],data=snapshot.payload;
+    const valid=!!data&&typeof data==="object"&&!Array.isArray(data)&&Object.keys(data).length===snapshot.record_count;
+    res.set("Cache-Control","no-store").json({ok:valid,snapshot_id:String(snapshot.id),record_count:snapshot.record_count,storage:"same_database",restore_tested:false});
+  }catch(e){res.status(503).json({ok:false,error:"verification_unavailable"});}
+}));
+app.get("/backup/status",(req,res)=>A(req,res,async()=>{
+  try{
+    const result=await Q("SELECT id,created_at,record_count FROM backups ORDER BY id DESC LIMIT 14");
+    res.json({snapshots_enabled:process.env.ENABLE_STAGING_SNAPSHOTS==="true",storage:"same_postgres_database_not_offsite",snapshots:result.rows});
+  }catch(e){res.status(503).json({error:"backup_status_unavailable"});}
+}));
+const PORT=Number(process.env.PORT)||10000;app.listen(PORT,"0.0.0.0",()=>console.log(`Greenair Invoice listening on ${PORT}`));init().then(()=>{console.log("Database initialised");scheduledSnapshot();setInterval(scheduledSnapshot,SNAPSHOT_INTERVAL_MS).unref();}).catch(e=>console.error("Database init error",e));+money(v.Gst!=null?v.Gst:total-total/1.1)+'</p><h2>Total: A
+  try{
+    const key="invoice:"+req.params.id;
+    const r=(await Q("select payload from records where record_key=$1",[key])).rows[0];
+    if(!r)return res.status(404).send("Invoice not found");
+    const v=D(r.payload);
+    let email=v.CustomerEmail||v.Email||"";
+    if(!email&&v.CustomerKey){
+      const c=(await Q("select payload from records where record_key=$1",[v.CustomerKey])).rows[0];
+      if(c)email=pick(D(c.payload),"Email","EmailAddress");
+    }
+    if(!email)return res.status(400).send(L("No customer email",'<h1>No customer email</h1><div class=c>Add an email address to this customer before sending the invoice.</div><p><a href="/invoice/view/'+encodeURIComponent(req.params.id)+'">Back to invoice</a></p>',req.session.user));
+    // Use the OS email handler rather than Gmail's desktop compose URL.
+    // The invoice view requires authentication, so never send that private URL to customers.
+    const subject="Greenair Tax Invoice "+(v.Number||"");
+    const body="Hi "+(v.CustomerName||"")+",\\r\\n\\r\\nPlease find your Greenair Tax Invoice "+(v.Number||"")+" attached.\\r\\n\\r\\nThank you,\\r\\nGreenair";
+    const mailto="mailto:"+encodeURIComponent(email)+"?subject="+encodeURIComponent(subject)+"&body="+encodeURIComponent(body);
+    const back="/invoice/view/"+encodeURIComponent(req.params.id);
+    res.set("Cache-Control","no-store").send(L("Email Invoice",'<h1>Email invoice '+E(v.Number||"")+'</h1><div class=c><p><b>To:</b> '+E(email)+'</p><p>Save the invoice as a PDF using <b>Print / Save PDF</b> on the invoice page, then attach that PDF in your email app.</p><p><a href="'+E(mailto)+'" style="display:inline-block;background:#176b45;color:#fff;padding:13px 18px;border-radius:7px;text-decoration:none">Open email app</a></p><p><a href="'+back+'">Back to invoice / Save PDF</a></p><small>This opens a draft only. Check the attachment and press Send in your email app. No email has been sent automatically.</small></div>',req.session.user));
+  }catch(e){
+    console.error("gmail compose",e);
+    res.status(500).send(L("Email could not open",'<h1>Email could not open</h1><div class=c>'+E(e.message)+'</div>',req.session.user));
+  }
+}));
+app.get("/invoice/view/:id",(req,res)=>A(req,res,async()=>{let key="invoice:"+req.params.id,r=(await Q("select payload from records where record_key=$1",[key])).rows[0];if(!r)return res.status(404).send("Invoice not found");let v=D(r.payload),items=Array.isArray(v.Items)?v.Items:[],money=n=>Number(n||0).toLocaleString("en-AU",{minimumFractionDigits:2,maximumFractionDigits:2}),date=x=>{let d=new Date(x);return isNaN(d)?"":d.toLocaleDateString("en-AU")};let total=Number(v.Total||0),subtotal=v.Subtotal!=null?Number(v.Subtotal):total/1.1,gst=v.Gst!=null?Number(v.Gst):total-subtotal;let rows=items.map(i=>`<tr><td>${E(i.Description||i.Name||"")}</td><td>${E(i.Quantity||1)}</td><td>${E(money(i.UnitPrice||i.Rate))}</td><td>${E(money(Number(i.Quantity||1)*Number(i.UnitPrice||i.Rate||0)))}</td></tr>`).join("");res.send(L("Invoice "+(v.Number||""),`<style>.inv{background:#fff;max-width:900px;margin:auto;padding:34px;color:#444}.green{color:#69ad45}.invtop{display:flex;justify-content:space-between;gap:30px}.brand{text-align:right;min-width:300px}.brand h1{font-size:30px;font-weight:400;margin:18px 0 0}.logoFix{width:280px;max-width:100%;box-sizing:border-box;background:linear-gradient(180deg,#075d12,#159a29 48%,#064d0e);border:3px solid #173c1d;color:#f1f1f1;font-family:Georgia,serif;font-size:38px;line-height:1;font-weight:700;letter-spacing:2px;text-align:center;padding:10px 12px;text-shadow:2px 2px 2px #222;white-space:nowrap;overflow:hidden}.bill{display:grid;grid-template-columns:1fr 1fr;gap:30px;margin:24px 0}.meta td{padding:3px 12px 3px 0;border:0}.items{width:100%;border-collapse:collapse}.items th{background:#e4f1dc;text-align:left;font-weight:400;padding:8px}.items td{padding:8px;border:0}.totals{margin:250px 0 55px auto;width:300px}.totals td{border:0;padding:5px}.balance{font-size:22px;color:#69ad45}.pay{background:#e4f1dc;padding:16px;display:flex;justify-content:space-between}.case{margin:25px 0}.actions{margin:18px auto;max-width:900px}@media(max-width:600px){.w{padding:8px}.inv{padding:16px;overflow:hidden}.invtop,.bill,.pay{display:block}.brand{text-align:left;margin-top:18px;min-width:0}.brand h1{margin-top:14px}.logoFix{width:100%;font-size:32px;letter-spacing:1px;padding:10px 8px}.brand img{margin-left:0!important;max-height:90px;object-fit:contain}.bill{margin-top:18px}.meta{width:100%;min-width:0!important;table-layout:fixed}.meta td{font-size:14px;overflow-wrap:anywhere}.items{width:100%!important;min-width:0!important;table-layout:fixed;font-size:11px}.items th,.items td{padding:6px 3px;overflow-wrap:anywhere}.items th:first-child,.items td:first-child{width:44%}.totals{margin-top:80px;width:100%;min-width:0}.pay{font-size:13px;overflow-wrap:anywhere}}@media print{@page{size:A4;margin:12mm}*,*::before,*::after{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}header,.actions{display:none!important}.inv{max-width:none;padding:12px}.w{max-width:none;padding:0}.logoFix{background:#087b20!important;color:#fff!important;border:3px solid #173c1d!important}.items th,.pay{background:#e4f1dc!important}.green,.balance{color:#69ad45!important}}</style><div class=inv><div class=invtop><div><b>Greenair</b><br>ABN 60202774371<br>Adelaide, SA<br>Locky 0412 395 325 | Brayden 0434 807 232<br>greenair.controls@gmail.com</div><div class=brand><div class="logoFix">GREENAIR</div><h1 class=green>Tax Invoice</h1></div></div><div class=bill><div><span class=green>INVOICE TO</span><br><br><b>${E(v.CustomerName||"")}</b><br>${E(v.CustomerAddress||v.Address||"")}</div><table class=meta><tr><td>INVOICE</td><td>${E(v.Number||"")}</td></tr><tr><td>DATE</td><td>${E(date(v.IssueDate))}</td></tr><tr><td>TERMS</td><td>${E(v.Terms||"Due on receipt")}</td></tr><tr><td>DUE DATE</td><td>${E(date(v.DueDate||v.IssueDate))}</td></tr></table></div><p><b>Email status:</b> ${E(v.EmailStatus||"Not sent")}${v.EmailSentUtc?" • Sent "+E(date(v.EmailSentUtc)):""}${v.EmailOpenedUtc?" • Opened "+E(new Date(v.EmailOpenedUtc).toLocaleString("en-AU")):""}</p><div class=case>CASE NO &nbsp;&nbsp;&nbsp;&nbsp; ${E(v.CaseNo||v.Job||v.Description||"")}</div><table class=items><tr><th>ACTIVITY</th><th>QTY</th><th>RATE</th><th>AMOUNT</th></tr>${rows}</table><table class=totals><tr><td>SUBTOTAL</td><td>${money(subtotal)}</td></tr><tr><td>GST TOTAL</td><td>${money(gst)}</td></tr><tr><td>TOTAL</td><td>${money(total)}</td></tr><tr class=balance><td>BALANCE DUE</td><td>A$${money(total)}</td></tr></table><div class=pay><div><b>BANK TRANSFER</b><br>Account: Lochlan Weeks<br>BSB: 062-692 &nbsp;&nbsp; Account: 83543903<br>Reference: ${E(v.Number||"")}</div><div class=green>PAYMENT</div></div></div><div class=actions><a href="/edit/invoice/${encodeURIComponent(req.params.id)}"><button>Edit Invoice</button></a> <button onclick="window.print()">Print / Save PDF</button> <a href="/invoice/email/${encodeURIComponent(req.params.id)}" target="_blank" rel="noopener"><button type=button>Email Invoice</button></a></div>`,req.session.user))}));
+app.get("/backup",(req,res)=>A(req,res,()=>res.send(L("Backup",'<h1>Backup & Migration</h1><div class=c><h2>Import Greenair v2 JSON</h2><form method=post action="/import" enctype="multipart/form-data"><input type=file name=backup accept=".json" required> <button>Import</button></form></div><div class=c><form method=post action="/snapshot"><button>Create server snapshot</button></form><p><a href="/export">Download current JSON export</a></p></div>',req.session.user))));
+app.post("/import",upload.single("backup"),(req,res)=>A(req,res,async()=>{try{let d=JSON.parse(req.file.buffer.toString()),r=d.Records||d.records;if(!r)throw Error("No Records map found");let c=await pool.connect();try{await c.query("begin");for(let[k,v]of Object.entries(r)){let t=k.includes(":")?k.split(":")[0]:(v.Type||v.type||"unknown").toLowerCase();await c.query("insert into records(record_key,record_type,payload) values($1,$2,$3) on conflict(record_key) do update set record_type=excluded.record_type,payload=excluded.payload,updated_at=now()",[k,t,v])}await c.query("commit")}catch(e){await c.query("rollback");throw e}finally{c.release()}res.redirect("/")}catch(e){res.status(400).send(L("Import error",'<div class=c>'+E(e.message)+'</div>',req.session.user))}}));
+app.post("/snapshot",(req,res)=>A(req,res,async()=>{let r=(await Q("select record_key,payload from records")).rows,o=Object.fromEntries(r.map(x=>[x.record_key,x.payload]));await Q("insert into backups(record_count,payload) values($1,$2)",[r.length,o]);await Q("delete from backups where id not in(select id from backups order by id desc limit 50)");res.redirect("/backup")}));
+app.get("/export",(req,res)=>A(req,res,async()=>{let r=(await Q("select record_key,payload from records")).rows;res.setHeader("Content-Disposition",'attachment; filename="greenair-web-backup.json"');res.json({SchemaVersion:2,ExportedUtc:new Date().toISOString(),Records:Object.fromEntries(r.map(x=>[x.record_key,x.payload]))})}));
+// Staging-only scheduled database snapshots. These are NOT offsite disaster recovery.
+const SNAPSHOT_INTERVAL_MS=24*60*60*1000;
+async function scheduledSnapshot(){
+  if(process.env.ENABLE_STAGING_SNAPSHOTS!=="true")return;
+  const client=await pool.connect();
+  let locked=false;
+  try{
+    const lock=await client.query("SELECT pg_try_advisory_lock(25370025) AS locked");
+    locked=lock.rows[0].locked;
+    if(!locked)return;
+    await client.query("BEGIN");
+    const recent=await client.query("SELECT created_at FROM backups ORDER BY created_at DESC LIMIT 1");
+    if(recent.rows.length && Date.now()-new Date(recent.rows[0].created_at).getTime()<20*60*60*1000){
+      await client.query("COMMIT");return;
+    }
+    const records=await client.query("SELECT record_key,payload FROM records ORDER BY record_key");
+    const data=Object.fromEntries(records.rows.map(r=>[r.record_key,r.payload]));
+    await client.query("INSERT INTO backups(record_count,payload) VALUES($1,$2)",[records.rowCount,data]);
+    await client.query("DELETE FROM backups WHERE id NOT IN (SELECT id FROM backups ORDER BY id DESC LIMIT 14)");
+    await client.query("COMMIT");
+    console.log("Scheduled staging snapshot completed; records:",records.rowCount);
+  }catch(err){
+    await client.query("ROLLBACK").catch(()=>{});
+    console.error("Scheduled staging snapshot failed:",err.message);
+  }finally{
+    if(locked)await client.query("SELECT pg_advisory_unlock(25370025)").catch(()=>{});
+    client.release();
+  }
+}
+// Portable offsite export of a retained snapshot, with an integrity digest.
+// Download to a separate device or cloud drive; snapshots in this database are not offsite.
+app.get("/backup/download/:id",(req,res)=>A(req,res,async()=>{
+  try{
+    if(!/^[1-9][0-9]{0,17}$/.test(req.params.id))return res.status(400).send("Invalid snapshot ID");
+    const r=await Q("SELECT id,created_at,record_count,payload FROM backups WHERE id=$1",[req.params.id]);
+    if(!r.rowCount)return res.status(404).send("Snapshot not found");
+    const snapshot=r.rows[0],records=snapshot.payload||{};
+    if(!records||typeof records!=="object"||Array.isArray(records))throw Error("Invalid snapshot contents");
+    const keys=Object.keys(records).sort();
+    if(keys.length!==snapshot.record_count)throw Error("Snapshot record count mismatch");
+    const ordered=Object.fromEntries(keys.map(k=>[k,records[k]]));
+    const crypto=require("crypto");
+    const digest=crypto.createHash("sha256").update(JSON.stringify(ordered)).digest("hex");
+    const date=new Date(snapshot.created_at).toISOString().slice(0,10);
+    const exportData={SchemaVersion:2,ExportedUtc:new Date().toISOString(),SnapshotId:String(snapshot.id),SnapshotCreatedUtc:snapshot.created_at,RecordCount:keys.length,RecordsSha256:digest,Records:ordered};
+    res.set("Cache-Control","no-store");
+    res.set("X-Content-Type-Options","nosniff");
+    res.set("Content-Disposition",'attachment; filename="greenair-invoice-v25-snapshot-'+date+'-'+snapshot.id+'.json"');
+    res.type("application/json").send(JSON.stringify(exportData));
+  }catch(err){
+    console.error("snapshot export failed",err.message);
+    res.status(500).send("Snapshot integrity check failed or export unavailable");
+  }
+}));
+app.get("/backup/verify/:id",(req,res)=>A(req,res,async()=>{
+  try{
+    if(!/^[1-9][0-9]{0,17}$/.test(req.params.id))return res.status(400).json({ok:false,error:"invalid_snapshot_id"});
+    const r=await Q("SELECT id,record_count,payload FROM backups WHERE id=$1",[req.params.id]);
+    if(!r.rowCount)return res.status(404).json({ok:false,error:"snapshot_not_found"});
+    const snapshot=r.rows[0],data=snapshot.payload;
+    const valid=!!data&&typeof data==="object"&&!Array.isArray(data)&&Object.keys(data).length===snapshot.record_count;
+    res.set("Cache-Control","no-store").json({ok:valid,snapshot_id:String(snapshot.id),record_count:snapshot.record_count,storage:"same_database",restore_tested:false});
+  }catch(e){res.status(503).json({ok:false,error:"verification_unavailable"});}
+}));
+app.get("/backup/status",(req,res)=>A(req,res,async()=>{
+  try{
+    const result=await Q("SELECT id,created_at,record_count FROM backups ORDER BY id DESC LIMIT 14");
+    res.json({snapshots_enabled:process.env.ENABLE_STAGING_SNAPSHOTS==="true",storage:"same_postgres_database_not_offsite",snapshots:result.rows});
+  }catch(e){res.status(503).json({error:"backup_status_unavailable"});}
+}));
+const PORT=Number(process.env.PORT)||10000;app.listen(PORT,"0.0.0.0",()=>console.log(`Greenair Invoice listening on ${PORT}`));init().then(()=>{console.log("Database initialised");scheduledSnapshot();setInterval(scheduledSnapshot,SNAPSHOT_INTERVAL_MS).unref();}).catch(e=>console.error("Database init error",e));+money(total)+'</h2><p class=noprint><button onclick="window.print()">Print / Save PDF</button></p><small>Greenair · Adelaide, SA</small></div>';
+    res.send(L("Greenair Tax Invoice",body,false));
+  }catch(e){console.error("shared invoice error",e.message);res.status(503).send("Invoice temporarily unavailable");}
+});
+app.get("/invoice/email/:id",(req,res)=>A(req,res,async()=>{
+  try{
+    const key="invoice:"+req.params.id;
+    const r=(await Q("select payload from records where record_key=$1",[key])).rows[0];
+    if(!r)return res.status(404).send("Invoice not found");
+    const v=D(r.payload);
+    let email=v.CustomerEmail||v.Email||"";
+    if(!email&&v.CustomerKey){
+      const c=(await Q("select payload from records where record_key=$1",[v.CustomerKey])).rows[0];
+      if(c)email=pick(D(c.payload),"Email","EmailAddress");
+    }
+    if(!email)return res.status(400).send(L("No customer email",'<h1>No customer email</h1><div class=c>Add an email address to this customer before sending the invoice.</div><p><a href="/invoice/view/'+encodeURIComponent(req.params.id)+'">Back to invoice</a></p>',req.session.user));
+    const crypto=require("crypto"),token=crypto.randomBytes(32).toString("hex");
+    const hash=crypto.createHash("sha256").update(token).digest("hex");
+    await Q("INSERT INTO invoice_share_links(token_hash,record_key,expires_at) VALUES($1,$2,now()+interval '30 days')",[hash,key]);
+    const origin="https://greenair-invoice-v25-staging.onrender.com";
+    const view=origin+"/invoice/shared/"+token;
+    const subject="Greenair Tax Invoice "+(v.Number||"");
+    const body="Hi "+(v.CustomerName||"")+",\r\n\r\nPlease view your Greenair Tax Invoice "+(v.Number||"")+" here:\r\n"+view+"\r\n\r\nThis secure link expires in 30 days.\r\n\r\nThank you,\r\nGreenair";
+    const mailto="mailto:"+encodeURIComponent(email)+"?subject="+encodeURIComponent(subject)+"&body="+encodeURIComponent(body);
+    res.set("Cache-Control","no-store").send(L("Email Invoice",'<h1>Email invoice '+E(v.Number||"")+'</h1><div class=c><p><b>To:</b> '+E(email)+'</p><p>A private invoice link has been included in your email draft. It expires after 30 days. Anyone with the link can view this invoice, so only send it to the intended customer.</p><p><a href="'+E(mailto)+'" style="display:inline-block;background:#176b45;color:#fff;padding:13px 18px;border-radius:7px;text-decoration:none">Open email app</a></p><p><a href="'+E(view)+'" target="_blank" rel="noopener noreferrer">Test customer invoice link</a></p><p><a href="/invoice/view/'+encodeURIComponent(req.params.id)+'">Back to invoice</a></p><small>Check the recipient and press Send in your email app. No email has been sent automatically.</small></div>',req.session.user));
   }catch(e){
     console.error("gmail compose",e);
     res.status(500).send(L("Email could not open",'<h1>Email could not open</h1><div class=c>'+E(e.message)+'</div>',req.session.user));
