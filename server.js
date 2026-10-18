@@ -143,7 +143,7 @@ app.get("/quote/email/:id",(req,res)=>A(req,res,async()=>{
     const crypto=require("crypto"),token=crypto.randomBytes(32).toString("hex");
     const hash=crypto.createHash("sha256").update(token).digest("hex");
     await Q("INSERT INTO invoice_share_links(token_hash,record_key,expires_at) VALUES($1,$2,now()+interval '30 days')",[hash,key]);
-    const view="https://greenair-quote-v25-staging.onrender.com/quote/shared/"+token;
+    const view="https://greenair-invoice-v25-staging.onrender.com/quote/shared/"+token;
     const subject="Greenair Quotation "+(v.Number||"");
     const body=["Hi "+(v.CustomerName||"")+",","","Your Greenair Quotation "+(v.Number||"")+" is available here:",view,"","This link expires in 30 days.","","Thank you,","Greenair"].join(String.fromCharCode(13,10));
     const mailto="mailto:"+encodeURIComponent(email)+"?subject="+encodeURIComponent(subject)+"&body="+encodeURIComponent(body);
