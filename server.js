@@ -39,7 +39,7 @@ app.post("/quote/convert/:id",(req,res)=>A(req,res,async()=>{
   const existing=(await client.query("select record_key,payload from records where record_type='invoice'")).rows;
   const previous=existing.find(r=>D(r.payload).SourceQuoteKey===key);
   if(previous){await client.query("ROLLBACK");return res.redirect("/invoice/view/"+encodeURIComponent(previous.record_key.slice(8)))}
-  const nums=existing.map(r=>String(D(r.payload).Number||"")).filter(n=>/^21\\d{3}$/.test(n)).map(Number);
+  const nums=existing.map(r=>String(D(r.payload).Number||"")).filter(n=>/^21\d{3}$/.test(n)).map(Number);
   const number=String(Math.max(21474,...nums)+1),id=U();
   const items=Array.isArray(q.Items)?q.Items.map(i=>({...i})):[];
   const total=Number(q.Total??q.GrandTotal??items.reduce((a,i)=>a+Number(i.Quantity||0)*Number(i.UnitPrice||0),0));
