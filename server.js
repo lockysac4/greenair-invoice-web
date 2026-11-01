@@ -391,6 +391,15 @@ app.post("/receipts/scan",(req,res)=>A(req,res,()=>receiptUpload.single("receipt
  try{
  let text="";
  if(f.mimetype==="application/pdf"){if(f.buffer.subarray(0,5).toString()!=="%PDF-")return res.status(400).json({error:"Invalid PDF"});try{const pdfjs=await import("pdfjs-dist/legacy/build/pdf.mjs");const task=pdfjs.getDocument({data:new Uint8Array(f.buffer),useSystemFonts:true,disableFontFace:true,stopAtErrors:false});const doc=await task.promise;try{for(let i=1;i<=Math.min(doc.numPages,3);i++){const page=await doc.getPage(i);const content=await page.getTextContent();text+=content.items.map(x=>(x.str||"")+(x.hasEOL?"\\n":" ")).join("")+"\\n";
+ // Add geometric reading order for PDFs with separate text objects.
+ const positioned=content.items.filter(t=>t.str&&t.transform&&Number.isFinite(t.transform[4])&&Number.isFinite(t.transform[5])).map(t=>({s:t.str.trim(),x:t.transform[4],y:t.transform[5]})).filter(t=>t.s);
+ const rows=[];
+ for(const item of positioned.sort((a,b)=>b.y-a.y||a.x-b.x)){
+   let row=rows.find(row=>Math.abs(row.y-item.y)<2.5);
+   if(!row){row={y:item.y,items:[]};rows.push(row);}
+   row.items.push(item);
+ }
+ text+=rows.sort((a,b)=>b.y-a.y).map(row=>row.items.sort((a,b)=>a.x-b.x).map(t=>t.s).join(" ")).join("\n")+"\n";
  // Preserve PDF column geometry: GST can be a table heading with its amount below.
  const items=content.items.filter(x=>x.str&&x.transform&&Number.isFinite(x.transform[4])&&Number.isFinite(x.transform[5])).map(x=>({str:x.str.trim(),x:x.transform[4],y:x.transform[5],w:x.width||0})).filter(x=>x.str);
  for(const heading of items.filter(x=>/^GST(?:\s*AMOUNT)?$/i.test(x.str))){
