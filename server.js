@@ -336,6 +336,21 @@ function parseReceiptText(text){
  const fullTaxable=/\b(?:all\s+items\s+(?:include|subject\s+to)\s+(?:10\s*%\s*)?gst|all\s+items\s+taxable\s+at\s+10\s*%|100\s*%\s+taxable\s+at\s+10\s*%)\b/i.test(raw);
  if(gst===null&&amount!==null&&fullTaxable)gst=Math.round(amount/11*100)/100;
  if(amount===null){const candidate=lines.filter(x=>/^\s*(?:AUD\s*)?\$?\s*[\d,]+\.\d{2}\s*$/i.test(x)).map(money).filter(x=>x!==null);if(candidate.length===1)amount=candidate[0];}
+ // Prepaid invoices can show Invoice Total / Balance as $0.00 while
+ // Deposit Amount contains the actual paid total. Cross-check against
+ // merchandise subtotal plus printed GST; never use an unverified sum.
+ if(gst!==null&&(amount===null||amount===0)){
+   const printed=[...raw.matchAll(/(?<![\d.])(?:AUD\s*)?\$?\s*(\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2})(?!\d)/gi)]
+     .map(m=>Number(m[1].replace(/,/g,""))).filter(Number.isFinite);
+   const cents=x=>Math.round(x*100);
+   const unique=[...new Set(printed.map(cents))];
+   const gstCents=cents(gst);
+   const matches=unique.filter(total=>total>gstCents&&unique.some(sub=>sub>0&&Math.abs(sub+gstCents-total)<=1));
+   // Require a single supported total and evidence this is a prepaid invoice.
+   if(matches.length===1&&/\b(?:prepay|prepaid|deposit|payment\s+terms)\b/i.test(raw)){
+     amount=matches[0]/100;
+   }
+ }
  if(gst!==null&&amount!==null&&gst>amount)gst=null;
  const dateMatch=raw.match(/\b([0-3]?\d)[\/.-]([01]?\d)[\/.-](20\d{2}|\d{2})\b/);
  let date=null;if(dateMatch){const y=dateMatch[3].length===2?"20"+dateMatch[3]:dateMatch[3],m=dateMatch[2].padStart(2,"0"),d=dateMatch[1].padStart(2,"0");const dt=new Date(y+"-"+m+"-"+d+"T00:00:00Z");if(!isNaN(dt)&&dt.getUTCDate()===Number(d)&&dt.getUTCMonth()+1===Number(m))date=y+"-"+m+"-"+d;}
