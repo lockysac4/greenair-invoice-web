@@ -314,12 +314,12 @@ function parseReceiptText(text){
  let amount=labelValue(totalLabel),gst=null;
  // Australian Bunnings PowerPass digital receipts.
  // Match the explicit purchase total and GST, not PowerPass savings.
- const isBunnings=/BUNNINGS\\s+GROUP\\s+LIMITED/i.test(raw)||/BUNNINGS/i.test(raw.replace(/\\s+/g,""));
+ const isBunnings=/\bBUNNINGS\b/i.test(raw);
  if(isBunnings){
    const totalLine=lines.find(line=>/^Total\s+\$?[\d,]+\.\d{2}\s*$/i.test(line))||lines.find(line=>/\bTotal\s+\$?[\d,]+\.\d{2}\b/i.test(line)&&!/savings|gst|sub\s*total/i.test(line));
    if(totalLine)amount=money(totalLine);
    const gstLine=lines.find(line=>/GST\s+INCLUDED\s+IN\s+THE\s+TOTAL/i.test(line));
-   if(gstLine){const tax=money(gstLine);if(tax!==null&&(amount===null||tax<=amount))gst=tax;}
+   if(gstLine){const tax=money(gstLine.replace(/.*?GST\s+INCLUDED\s+IN\s+THE\s+TOTAL/i,""));if(tax!==null&&(amount===null||tax<=amount))gst=tax;}
  }
  // Find the tax amount explicitly, avoiding "Total incl GST" (which is the invoice total).
  const taxRows=lines.map((line,i)=>({line,i})).filter(({line})=>/\b(?:gst|tax)\b/i.test(line)&&!/\b(?:total\s+(?:inc|incl|including)\s*gst|including\s+gst|gst\s+inclusive|inc\.?\s*gst)\b/i.test(line));
@@ -363,7 +363,7 @@ function parseReceiptText(text){
  }
  if(gst!==null&&amount!==null&&gst>amount)gst=null;
  // Date can be split into separate PDF text items; tolerate spaces around separators.
- const normalizedDates=raw.replace(/(\\d{1,2})\\s*([\\/.-])\\s*(\\d{1,2})\\s*\\2\\s*(20\\d{2})/g,"$1/$3/$4");
+ const normalizedDates=raw.replace(/(\d{1,2})\s*([\/.-])\s*(\d{1,2})\s*\2\s*(20\d{2}|\d{2})/g,"$1/$3/$4");
  const dateMatch=normalizedDates.match(/\b([0-3]?\d)[\/.-]([01]?\d)[\/.-](20\d{2}|\d{2})\b/);
  let date=null;if(dateMatch){const y=dateMatch[3].length===2?"20"+dateMatch[3]:dateMatch[3],m=dateMatch[2].padStart(2,"0"),d=dateMatch[1].padStart(2,"0");const dt=new Date(y+"-"+m+"-"+d+"T00:00:00Z");if(!isNaN(dt)&&dt.getUTCDate()===Number(d)&&dt.getUTCMonth()+1===Number(m))date=y+"-"+m+"-"+d;}
  const supplierCandidates=lines.slice(0,24).filter(x=>/[a-z]{3}/i.test(x)&&!/(^.{0,12}\d{2,}|tax invoice|receipt|abn|gst|total|date|invoice|cash|visa|eftpos|thank you|www\.|http|customer|deliver|ship to|bill to|account|purchase order|reference|job no|phone|mobile|email|address|page \d|\b(?:SA|NSW|VIC|QLD|WA|TAS|ACT|NT)\s+\d{4}\b|\b(?:street|st|road|rd|avenue|ave|drive|dr|po box)\b)/i.test(x)&&x.length<=90);
