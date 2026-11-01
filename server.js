@@ -316,8 +316,9 @@ function parseReceiptText(text){
  if(gst!==null&&amount!==null&&gst>amount)gst=null;
  const dateMatch=raw.match(/\b([0-3]?\d)[\/.-]([01]?\d)[\/.-](20\d{2}|\d{2})\b/);
  let date=null;if(dateMatch){const y=dateMatch[3].length===2?"20"+dateMatch[3]:dateMatch[3],m=dateMatch[2].padStart(2,"0"),d=dateMatch[1].padStart(2,"0");const dt=new Date(y+"-"+m+"-"+d+"T00:00:00Z");if(!isNaN(dt)&&dt.getUTCDate()===Number(d)&&dt.getUTCMonth()+1===Number(m))date=y+"-"+m+"-"+d;}
- const supplierCandidates=lines.slice(0,18).filter(x=>/[a-z]{3}/i.test(x)&&!/(^.{0,12}\d{2,}|tax invoice|receipt|abn|gst|total|date|invoice|cash|visa|eftpos|thank you|www\.|http|customer|deliver|ship to|bill to|account|purchase order|reference|job no|phone|mobile|email|address|page \d)/i.test(x)&&x.length<=90);
- const supplier=supplierCandidates[0]||"";
+ const supplierCandidates=lines.slice(0,24).filter(x=>/[a-z]{3}/i.test(x)&&!/(^.{0,12}\d{2,}|tax invoice|receipt|abn|gst|total|date|invoice|cash|visa|eftpos|thank you|www\.|http|customer|deliver|ship to|bill to|account|purchase order|reference|job no|phone|mobile|email|address|page \d|\b(?:SA|NSW|VIC|QLD|WA|TAS|ACT|NT)\s+\d{4}\b|\b(?:street|st|road|rd|avenue|ave|drive|dr|po box)\b)/i.test(x)&&x.length<=90);
+ const poolSupplier=lines.slice(0,24).find(x=>/\bpool\s*systems?\b/i.test(x)&&!/customer|deliver|ship to|bill to|reference/i.test(x));
+ const supplier=poolSupplier?"Pool Systems":(supplierCandidates[0]||"");
  const warning=[!supplier?"Supplier not confidently identified.":"",amount===null?"Total amount not confidently identified.":"",gst===null?"GST not confidently identified.":""].filter(Boolean).join(" ");
  return {supplier:supplier.slice(0,200),receipt_date:date,amount,gst,warning};
 }
