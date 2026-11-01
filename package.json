@@ -19,6 +19,7 @@
     "nodemailer": "^7.0.6",
     "tesseract.js": "^5.1.1",
     "pdf-parse": "^1.1.1",
-    "pdfjs-dist": "^4.10.38"
+    "pdfjs-dist": "^4.10.38",
+    "@napi-rs/canvas": "^0.1.69"
   }
 }
