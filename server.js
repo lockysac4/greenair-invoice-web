@@ -332,6 +332,13 @@ function parseReceiptText(text){
    const explicitGst=matchValue(/\bGST\s+INCLUDED\s+IN\s+THE\s+TOTAL\b/i,/\b(?:Online Payment|CARD NO|Rounding|Change|Savings)\b/i);
    amount=explicitTotal??payment??subtotal;
    gst=explicitGst;
+   // If the PDF separates the GST label and figure, only accept the
+   // exact 10% GST figure when it is also printed in the receipt.
+   if(gst===null&&amount!==null){
+     const expected=Math.round(amount/11*100)/100;
+     const printed=[...raw.matchAll(/(?<![\\d.])(?:\\$\\s*)?(\\d+\\.\\d{2})(?!\\d)/g)].map(m=>Number(m[1]));
+     if(printed.some(v=>Math.abs(v-expected)<0.005))gst=expected;
+   }
    if(amount!==null&&gst!==null&&gst>amount)gst=null;
  }
  // Find the tax amount explicitly, avoiding "Total incl GST" (which is the invoice total).
@@ -379,6 +386,15 @@ function parseReceiptText(text){
  const normalizedDates=raw.replace(/(\d{1,2})\s*([\/.-])\s*(\d{1,2})\s*\2\s*(20\d{2}|\d{2})/g,"$1/$3/$4");
  const dateMatch=normalizedDates.match(/\b([0-3]?\d)[\/.-]([01]?\d)[\/.-](20\d{2}|\d{2})\b/);
  let date=null;if(dateMatch){const y=dateMatch[3].length===2?"20"+dateMatch[3]:dateMatch[3],m=dateMatch[2].padStart(2,"0"),d=dateMatch[1].padStart(2,"0");const dt=new Date(y+"-"+m+"-"+d+"T00:00:00Z");if(!isNaN(dt)&&dt.getUTCDate()===Number(d)&&dt.getUTCMonth()+1===Number(m))date=y+"-"+m+"-"+d;}
+ if(!date){
+   const months={jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12};
+   const m=raw.match(/\\b([0-3]?\\d)\\s+([A-Za-z]{3,9})\\s+(20\\d{2})\\b/);
+   if(m&&months[m[2].slice(0,3).toLowerCase()]){
+     const month=String(months[m[2].slice(0,3).toLowerCase()]).padStart(2,"0"),day=m[1].padStart(2,"0");
+     const d=new Date(m[3]+"-"+month+"-"+day+"T00:00:00Z");
+     if(d.getUTCDate()===Number(day))date=m[3]+"-"+month+"-"+day;
+   }
+ }
  const supplierCandidates=lines.slice(0,24).filter(x=>/[a-z]{3}/i.test(x)&&!/(^.{0,12}\d{2,}|tax invoice|receipt|abn|gst|total|date|invoice|cash|visa|eftpos|thank you|www\.|http|customer|deliver|ship to|bill to|account|purchase order|reference|job no|phone|mobile|email|address|page \d|\b(?:SA|NSW|VIC|QLD|WA|TAS|ACT|NT)\s+\d{4}\b|\b(?:street|st|road|rd|avenue|ave|drive|dr|po box)\b)/i.test(x)&&x.length<=90);
  const poolSupplier=/\bpool\s*systems?\b/i.test(raw);
  const supplier=isBunnings?"Bunnings Warehouse":(poolSupplier?"Pool Systems":(supplierCandidates[0]||""));
