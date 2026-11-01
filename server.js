@@ -312,16 +312,19 @@ function parseReceiptText(text){
  const totalLabel=/\b(?:grand\s*total|invoice\s*total|total\s*(?:inc(?:luding)?\.?\s*(?:gst|tax)|due|payable|amount|aud)|amount\s*(?:payable|due|paid)|balance\s*due|total)\b\s*[:=\-]*/i;
  const taxLabel=/\b(?:gst\s*(?:amount|total|included|10%)?|tax\s*(?:amount|total|included))\b\s*[:=\-]*/i;
  let amount=labelValue(totalLabel),gst=null;
- // Bunnings receipt format has an explicit Total and GST INCLUDED IN THE TOTAL.
- if(/BUNNINGS GROUP LIMITED/i.test(raw)){
-   const totalLine=lines.find(line=>/^Total\\s+\\$?[\\d,]+\\.\\d{2}\\s*$/i.test(line));
+ // Australian Bunnings PowerPass digital receipts.
+ // Match the explicit purchase total and GST, not PowerPass savings.
+ const isBunnings=/BUNNINGS\s+GROUP\s+LIMITED/i.test(raw);
+ if(isBunnings){
+   const totalLine=lines.find(line=>/^Total\s+\$?[\d,]+\.\d{2}\s*$/i.test(line));
    if(totalLine)amount=money(totalLine);
-   const gstLine=lines.find(line=>/GST INCLUDED IN THE TOTAL/i.test(line));
+   const gstLine=lines.find(line=>/GST\s+INCLUDED\s+IN\s+THE\s+TOTAL/i.test(line));
    if(gstLine){const tax=money(gstLine);if(tax!==null&&(amount===null||tax<=amount))gst=tax;}
  }
  // Find the tax amount explicitly, avoiding "Total incl GST" (which is the invoice total).
  const taxRows=lines.map((line,i)=>({line,i})).filter(({line})=>/\b(?:gst|tax)\b/i.test(line)&&!/\b(?:total\s+(?:inc|incl|including)\s*gst|including\s+gst|gst\s+inclusive|inc\.?\s*gst)\b/i.test(line));
  for(const {line,i} of taxRows.reverse()){
+   if(isBunnings&&gst!==null)break;
    const prefix=/\b(?:gst(?:\s*(?:amount|total|payable|charged|included|10\s*%))?|tax\s*(?:amount|total|payable|charged))\b\s*[:=\-]*/i;
    const match=prefix.exec(line);if(!match)continue;
    const rest=line.slice(match.index+match[0].length);
