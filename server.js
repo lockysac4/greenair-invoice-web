@@ -312,6 +312,13 @@ function parseReceiptText(text){
  const totalLabel=/\b(?:grand\s*total|invoice\s*total|total\s*(?:inc(?:luding)?\.?\s*(?:gst|tax)|due|payable|amount|aud)|amount\s*(?:payable|due|paid)|balance\s*due|total)\b\s*[:=\-]*/i;
  const taxLabel=/\b(?:gst\s*(?:amount|total|included|10%)?|tax\s*(?:amount|total|included))\b\s*[:=\-]*/i;
  let amount=labelValue(totalLabel),gst=null;
+ // Bunnings receipt format has an explicit Total and GST INCLUDED IN THE TOTAL.
+ if(/BUNNINGS GROUP LIMITED/i.test(raw)){
+   const totalLine=lines.find(line=>/^Total\\s+\\$?[\\d,]+\\.\\d{2}\\s*$/i.test(line));
+   if(totalLine)amount=money(totalLine);
+   const gstLine=lines.find(line=>/GST INCLUDED IN THE TOTAL/i.test(line));
+   if(gstLine){const tax=money(gstLine);if(tax!==null&&(amount===null||tax<=amount))gst=tax;}
+ }
  // Find the tax amount explicitly, avoiding "Total incl GST" (which is the invoice total).
  const taxRows=lines.map((line,i)=>({line,i})).filter(({line})=>/\b(?:gst|tax)\b/i.test(line)&&!/\b(?:total\s+(?:inc|incl|including)\s*gst|including\s+gst|gst\s+inclusive|inc\.?\s*gst)\b/i.test(line));
  for(const {line,i} of taxRows.reverse()){
@@ -356,7 +363,7 @@ function parseReceiptText(text){
  let date=null;if(dateMatch){const y=dateMatch[3].length===2?"20"+dateMatch[3]:dateMatch[3],m=dateMatch[2].padStart(2,"0"),d=dateMatch[1].padStart(2,"0");const dt=new Date(y+"-"+m+"-"+d+"T00:00:00Z");if(!isNaN(dt)&&dt.getUTCDate()===Number(d)&&dt.getUTCMonth()+1===Number(m))date=y+"-"+m+"-"+d;}
  const supplierCandidates=lines.slice(0,24).filter(x=>/[a-z]{3}/i.test(x)&&!/(^.{0,12}\d{2,}|tax invoice|receipt|abn|gst|total|date|invoice|cash|visa|eftpos|thank you|www\.|http|customer|deliver|ship to|bill to|account|purchase order|reference|job no|phone|mobile|email|address|page \d|\b(?:SA|NSW|VIC|QLD|WA|TAS|ACT|NT)\s+\d{4}\b|\b(?:street|st|road|rd|avenue|ave|drive|dr|po box)\b)/i.test(x)&&x.length<=90);
  const poolSupplier=/\bpool\s*systems?\b/i.test(raw);
- const supplier=poolSupplier?"Pool Systems":(supplierCandidates[0]||"");
+ const supplier=/BUNNINGS GROUP LIMITED/i.test(raw)?"Bunnings Warehouse":(poolSupplier?"Pool Systems":(supplierCandidates[0]||""));
  const warning=[!supplier?"Supplier not confidently identified.":"",amount===null?"Total amount not confidently identified.":"",gst===null?"GST not confidently identified.":""].filter(Boolean).join(" ");
  return {supplier:supplier.slice(0,200),receipt_date:date,amount,gst,warning};
 }
