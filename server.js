@@ -324,6 +324,14 @@ function parseReceiptText(text){
  }
  // OCR sometimes puts the GST figure before its label on the same line.
  if(gst===null){for(const line of lines){const match=line.match(/(?:^|\s)(\$?\s*[\d,]+\.\d{2})\s+(?:GST|GST\s+AMOUNT|TAX\s+AMOUNT)\b/i);if(match){const candidate=money(match[1]);if(candidate!==null&&(amount===null||candidate<=amount)){gst=candidate;break;}}}}
+ // For PDF summary tables, the heading and the numeric cell may be far apart
+ // in text-reading order. Accept a 10% GST amount only if that exact number
+ // is actually printed in the document and a GST heading is present.
+ if(gst===null&&amount!==null&&/\bGST\b/i.test(raw)){
+   const expected=Math.round(amount/11*100)/100;
+   const values=[...raw.matchAll(/(?<![\d.])(?:AUD\s*)?\$?\s*(\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2})(?!\d)/gi)].map(m=>Number(m[1].replace(/,/g,"")));
+   if(values.some(v=>Math.abs(v-expected)<0.005))gst=expected;
+ }
  // Calculate only where the document explicitly confirms every item is taxed at 10%.
  const fullTaxable=/\b(?:all\s+items\s+(?:include|subject\s+to)\s+(?:10\s*%\s*)?gst|all\s+items\s+taxable\s+at\s+10\s*%|100\s*%\s+taxable\s+at\s+10\s*%)\b/i.test(raw);
  if(gst===null&&amount!==null&&fullTaxable)gst=Math.round(amount/11*100)/100;
