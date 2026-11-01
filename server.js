@@ -321,10 +321,23 @@ function parseReceiptText(text){
    const gstLine=lines.find(line=>/GST\s+INCLUDED\s+IN\s+THE\s+TOTAL/i.test(line));
    if(gstLine){const tax=money(gstLine.replace(/.*?GST\s+INCLUDED\s+IN\s+THE\s+TOTAL/i,""));if(tax!==null&&(amount===null||tax<=amount))gst=tax;}
  }
+ // Read Bunnings totals from the actual labelled rows. PDF.js may
+ // split headings and values into separate items or flatten the whole page.
+ // A PowerPass savings amount must never become either total or GST.
+ if(isBunnings){
+   const matchValue=(label,stop)=>{const m=raw.match(label);if(!m)return null;const tail=raw.slice(m.index+m[0].length).split(stop)[0].slice(0,110);return money(tail);};
+   const subtotal=matchValue(/\bSubTotal\s*:/i,/\b(?:Total|GST|Online Payment|PowerPass Savings)\b/i);
+   const payment=matchValue(/\bOnline\s+Payment\b/i,/\b(?:CARD NO|Ref:|Rounding|Change|Savings)\b/i);
+   const explicitTotal=matchValue(/(?:^|\n)\s*Total\b(?!\s+PowerPass)/i,/\b(?:GST INCLUDED|Online Payment|CARD NO|Rounding|Savings)\b/i);
+   const explicitGst=matchValue(/\bGST\s+INCLUDED\s+IN\s+THE\s+TOTAL\b/i,/\b(?:Online Payment|CARD NO|Rounding|Change|Savings)\b/i);
+   amount=explicitTotal??payment??subtotal;
+   gst=explicitGst;
+   if(amount!==null&&gst!==null&&gst>amount)gst=null;
+ }
  // Find the tax amount explicitly, avoiding "Total incl GST" (which is the invoice total).
  const taxRows=lines.map((line,i)=>({line,i})).filter(({line})=>/\b(?:gst|tax)\b/i.test(line)&&!/\b(?:total\s+(?:inc|incl|including)\s*gst|including\s+gst|gst\s+inclusive|inc\.?\s*gst)\b/i.test(line));
  for(const {line,i} of taxRows.reverse()){
-   if(isBunnings&&gst!==null)break;
+   if(isBunnings)break;
    const prefix=/\b(?:gst(?:\s*(?:amount|total|payable|charged|included|10\s*%))?|tax\s*(?:amount|total|payable|charged))\b\s*[:=\-]*/i;
    const match=prefix.exec(line);if(!match)continue;
    const rest=line.slice(match.index+match[0].length);
@@ -333,19 +346,19 @@ function parseReceiptText(text){
    if(candidate!==null&&candidate>=0&&(amount===null||candidate<=amount)){gst=candidate;break;}
  }
  // OCR sometimes puts the GST figure before its label on the same line.
- if(gst===null){for(const line of lines){const match=line.match(/(?:^|\s)(\$?\s*[\d,]+\.\d{2})\s+(?:GST|GST\s+AMOUNT|TAX\s+AMOUNT)\b/i);if(match){const candidate=money(match[1]);if(candidate!==null&&(amount===null||candidate<=amount)){gst=candidate;break;}}}}
+ if(gst===null&&!isBunnings){for(const line of lines){const match=line.match(/(?:^|\s)(\$?\s*[\d,]+\.\d{2})\s+(?:GST|GST\s+AMOUNT|TAX\s+AMOUNT)\b/i);if(match){const candidate=money(match[1]);if(candidate!==null&&(amount===null||candidate<=amount)){gst=candidate;break;}}}}
  // For PDF summary tables, the heading and the numeric cell may be far apart
  // in text-reading order. Accept a 10% GST amount only if that exact number
  // is actually printed in the document and a GST heading is present.
- if(gst===null&&amount!==null&&/\bGST\b/i.test(raw)){
+ if(!isBunnings&&gst===null&&amount!==null&&/\bGST\b/i.test(raw)){
    const expected=Math.round(amount/11*100)/100;
    const values=[...raw.matchAll(/(?<![\d.])(?:AUD\s*)?\$?\s*(\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2})(?!\d)/gi)].map(m=>Number(m[1].replace(/,/g,"")));
    if(values.some(v=>Math.abs(v-expected)<0.005))gst=expected;
  }
  // Calculate only where the document explicitly confirms every item is taxed at 10%.
  const fullTaxable=/\b(?:all\s+items\s+(?:include|subject\s+to)\s+(?:10\s*%\s*)?gst|all\s+items\s+taxable\s+at\s+10\s*%|100\s*%\s+taxable\s+at\s+10\s*%)\b/i.test(raw);
- if(gst===null&&amount!==null&&fullTaxable)gst=Math.round(amount/11*100)/100;
- if(amount===null){const candidate=lines.filter(x=>/^\s*(?:AUD\s*)?\$?\s*[\d,]+\.\d{2}\s*$/i.test(x)).map(money).filter(x=>x!==null);if(candidate.length===1)amount=candidate[0];}
+ if(!isBunnings&&gst===null&&amount!==null&&fullTaxable)gst=Math.round(amount/11*100)/100;
+ if(amount===null&&!isBunnings){const candidate=lines.filter(x=>/^\s*(?:AUD\s*)?\$?\s*[\d,]+\.\d{2}\s*$/i.test(x)).map(money).filter(x=>x!==null);if(candidate.length===1)amount=candidate[0];}
  // Prepaid invoices can show Invoice Total / Balance as $0.00 while
  // Deposit Amount contains the actual paid total. Cross-check against
  // merchandise subtotal plus printed GST; never use an unverified sum.
