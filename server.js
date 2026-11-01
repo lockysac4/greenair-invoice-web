@@ -311,7 +311,22 @@ function parseReceiptText(text){
  const labelValue=(pattern)=>{for(let i=lines.length-1;i>=0;i--){if(!pattern.test(lines[i]))continue;const direct=money(lines[i].replace(pattern,""));if(direct!==null)return direct;for(let j=i+1;j<=Math.min(i+2,lines.length-1);j++){if(/(?:total|gst|tax|balance|paid|amount|invoice|subtotal)/i.test(lines[j])&&!/^\$?\s*[\d,]+\.\d{2}\s*$/.test(lines[j]))break;const next=money(lines[j]);if(next!==null)return next;}}return null};
  const totalLabel=/\b(?:grand\s*total|invoice\s*total|total\s*(?:inc(?:luding)?\.?\s*(?:gst|tax)|due|payable|amount|aud)|amount\s*(?:payable|due|paid)|balance\s*due|total)\b\s*[:=\-]*/i;
  const taxLabel=/\b(?:gst\s*(?:amount|total|included|10%)?|tax\s*(?:amount|total|included))\b\s*[:=\-]*/i;
- let amount=labelValue(totalLabel),gst=labelValue(taxLabel);
+ let amount=labelValue(totalLabel),gst=null;
+ // Find the tax amount explicitly, avoiding "Total incl GST" (which is the invoice total).
+ const taxRows=lines.map((line,i)=>({line,i})).filter(({line})=>/\b(?:gst|tax)\b/i.test(line)&&!/\b(?:total\s+(?:inc|incl|including)\s*gst|including\s+gst|gst\s+inclusive|inc\.?\s*gst)\b/i.test(line));
+ for(const {line,i} of taxRows.reverse()){
+   const prefix=/\b(?:gst(?:\s*(?:amount|total|payable|charged|included|10\s*%))?|tax\s*(?:amount|total|payable|charged))\b\s*[:=\-]*/i;
+   const match=prefix.exec(line);if(!match)continue;
+   const rest=line.slice(match.index+match[0].length);
+   let candidate=money(rest);
+   if(candidate===null&&i+1<lines.length&&/^(?:AUD\s*)?\$?\s*[\d,]+\.\d{2}\s*$/.test(lines[i+1]))candidate=money(lines[i+1]);
+   if(candidate!==null&&candidate>=0&&(amount===null||candidate<=amount)){gst=candidate;break;}
+ }
+ // OCR sometimes puts the GST figure before its label on the same line.
+ if(gst===null){for(const line of lines){const match=line.match(/(?:^|\s)(\$?\s*[\d,]+\.\d{2})\s+(?:GST|GST\s+AMOUNT|TAX\s+AMOUNT)\b/i);if(match){const candidate=money(match[1]);if(candidate!==null&&(amount===null||candidate<=amount)){gst=candidate;break;}}}}
+ // Calculate only where the document explicitly confirms every item is taxed at 10%.
+ const fullTaxable=/\b(?:all\s+items\s+(?:include|subject\s+to)\s+(?:10\s*%\s*)?gst|all\s+items\s+taxable\s+at\s+10\s*%|100\s*%\s+taxable\s+at\s+10\s*%)\b/i.test(raw);
+ if(gst===null&&amount!==null&&fullTaxable)gst=Math.round(amount/11*100)/100;
  if(amount===null){const candidate=lines.filter(x=>/^\s*(?:AUD\s*)?\$?\s*[\d,]+\.\d{2}\s*$/i.test(x)).map(money).filter(x=>x!==null);if(candidate.length===1)amount=candidate[0];}
  if(gst!==null&&amount!==null&&gst>amount)gst=null;
  const dateMatch=raw.match(/\b([0-3]?\d)[\/.-]([01]?\d)[\/.-](20\d{2}|\d{2})\b/);
