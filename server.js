@@ -95,9 +95,23 @@ app.get("/schedule",(req,res)=>A(req,res,async()=>{
  const jobs=(await Q("select record_key,payload from records where record_type='schedule' order by updated_at desc limit 3000")).rows.map(r=>({key:r.record_key,v:D(r.payload)}));
  const opts=customers.map(r=>{const v=D(r.payload);return '<option value="'+E(r.record_key)+'">'+E(v.Name||v.CustomerName||v.CompanyName||r.record_key)+'</option>'}).join("");
  const visible=jobs.filter(j=>j.v.Date===day).sort((a,b)=>(a.v.Start||"").localeCompare(b.v.Start||""));
- const cards=visible.map(j=>{const v=j.v;return '<div class=c><b>'+E(v.Start||"")+" - "+E(v.End||"")+'</b> '+E(v.CustomerName||"")+'<p>'+E(v.Description||"")+'</p><small>'+E(v.Address||"")+' | '+E(v.Technician||"")+' | '+E(v.Status||"Scheduled")+'</small><p><a href="/schedule/edit/'+encodeURIComponent(j.key)+'">Edit booking</a></p></div>'}).join("")||'<div class=c>No bookings for this day.</div>';
+ const cards=visible.map(j=>{const v=j.v;return '<div class=c><b>'+E(v.Start||"")+" - "+E(v.End||"")+'</b> '+E(v.CustomerName||"")+'<p>'+E(v.Description||"")+'</p><small>'+E(v.Address||"")+' | '+E(v.Technician||"")+' | '+E(v.Status||"Scheduled")+'</small><p><a href="/schedule/edit/'+encodeURIComponent(j.key)+'">Edit booking</a> | <a href="/schedule/email/'+encodeURIComponent(j.key)+'">Email booking</a></p></div>'}).join("")||'<div class=c>No bookings for this day.</div>';
  const body='<h1>Job Schedule</h1><div class=c><form method=get action="/schedule"><label>View date <input type=date name=day value="'+E(day)+'"></label> <button>View</button></form><p><a href="/schedule/new?day='+encodeURIComponent(day)+'">+ Add Booking</a> | <a href="/schedule/week?day='+encodeURIComponent(day)+'">Week View</a></p></div>'+cards;
  res.send(L("Job Schedule",body,req.session.user));
+}));
+app.get("/schedule/email/:key",(req,res)=>A(req,res,async()=>{
+ const row=(await Q("select payload from records where record_key=$1 and record_type='schedule'",[req.params.key])).rows[0];
+ if(!row)return res.status(404).send("Booking not found");
+ const v=D(row.payload);
+ const customer=(await Q("select payload from records where record_key=$1 and record_type='customer'",[v.CustomerKey||""])).rows[0];
+ const c=customer?D(customer.payload):{};
+ const email=String(c.Email||c.EmailAddress||"").trim();
+ const name=v.CustomerName||c.Name||"Customer";
+ if(!email||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))return res.status(400).send(L("Customer email needed",'<div class=c><h2>Customer email required</h2><p>Add a valid email address to this customer before sending the booking.</p><a href="/schedule">Back to Schedule</a></div>',req.session.user));
+ const subject="Greenair Booking Confirmation - "+(v.Date||"");
+ const body=["Hi "+name+",","","This is confirmation of your booking with Greenair.","","Date: "+(v.Date||""),"Time: "+(v.Start||"")+" to "+(v.End||""),"Address: "+(v.Address||c.Address||""),"Work: "+(v.Description||""),"Technician: "+(v.Technician||""),"","Please contact us if you need to change this booking.","","Regards,","Greenair"].join("\r\n");
+ const mailto="mailto:"+encodeURIComponent(email)+"?subject="+encodeURIComponent(subject)+"&body="+encodeURIComponent(body);
+ res.set("Cache-Control","no-store").send(L("Email Booking",'<h1>Email Booking</h1><div class=c><p><b>To:</b> '+E(email)+'</p><p><b>Subject:</b> '+E(subject)+'</p><pre style="white-space:pre-wrap;font-family:inherit">'+E(body)+'</pre><p><a href="'+E(mailto)+'">Open email app to send</a></p><small>No email is sent until you send it from your email app.</small></div>',req.session.user));
 }));
 async function scheduleForm(req,res,editing){
  const key=req.params.key||"",row=editing?(await Q("select payload from records where record_key=$1 and record_type='schedule'",[key])).rows[0]:null;
