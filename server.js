@@ -513,8 +513,7 @@ app.get("/receipts/file/:id",(req,res)=>A(req,res,async()=>{
   const safeName=String(file.filename||"receipt").replace(/[\r\n\\/]/g,"_").replace(/[^\x20-\x7e]/g,"_").replace(/["\\]/g,"_").slice(0,160)||"receipt";
   res.set("Cache-Control","private, no-store");
   res.set("X-Content-Type-Options","nosniff");
-  res.set("Content-Security-Policy","sandbox");
-  res.set("Content-Disposition",'inline; filename="'+safeName+'"');
+  res.set("Content-Disposition",'attachment; filename="'+safeName+'"');
   res.type(file.mime);
   res.send(file.file_data);
  }catch(e){console.error("receipt download",e);res.status(500).send("Receipt could not be opened")}
