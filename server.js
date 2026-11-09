@@ -1,4 +1,4 @@
-const nodemailer=require("nodemailer"),express=require("express"),{Pool}=require("pg"),session=require("express-session"),PgStore=require("connect-pg-simple")(session),bcrypt=require("bcryptjs"),helmet=require("helmet"),multer=require("multer");
+const PDFDocument=require("pdfkit"),nodemailer=require("nodemailer"),express=require("express"),{Pool}=require("pg"),session=require("express-session"),PgStore=require("connect-pg-simple")(session),bcrypt=require("bcryptjs"),helmet=require("helmet"),multer=require("multer");
 const app=express(),upload=multer({storage:multer.memoryStorage(),limits:{fileSize:20*1024*1024}}),pool=new Pool({connectionString:process.env.DATABASE_URL,ssl:process.env.NODE_ENV==="production"?{rejectUnauthorized:false}:false});
 app.set("trust proxy",1);app.use(helmet({contentSecurityPolicy:false}));app.use(express.urlencoded({extended:true,limit:"15mb"}));app.use(express.json({limit:"15mb"}));app.use(session({store:new PgStore({pool,tableName:"user_sessions",createTableIfMissing:true}),secret:process.env.SESSION_SECRET,resave:false,saveUninitialized:false,cookie:{httpOnly:true,secure:process.env.NODE_ENV==="production",sameSite:"lax",maxAge:43200000}}));
 const Q=(s,p=[])=>pool.query(s,p),D=v=>{if(v&&v.Json!=null){try{return typeof v.Json==="string"?JSON.parse(v.Json):v.Json}catch{}}return v||{}},E=x=>String(x??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])),A=(req,res,n)=>req.session.user?n():res.redirect("/login");
@@ -138,10 +138,10 @@ const maintToday=()=>new Date().toLocaleDateString("en-CA",{timeZone:"Australia/
 const maintAddMonths=(date,months)=>{const d=new Date(date+"T12:00:00Z");const day=d.getUTCDate();d.setUTCDate(1);d.setUTCMonth(d.getUTCMonth()+months);const last=new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+1,0)).getUTCDate();d.setUTCDate(Math.min(day,last));return d.toISOString().slice(0,10)};
 const maintTomorrow=()=>{const d=new Date(maintToday()+"T12:00:00Z");d.setUTCDate(d.getUTCDate()+1);return d.toISOString().slice(0,10)};
 const maintMailReady=()=>Boolean(process.env.SMTP_USER&&process.env.SMTP_PASS);
-async function maintEmail(to,subject,body){
+async function maintEmail(to,subject,body,attachments=[]){
  if(!maintMailReady())throw Error("SMTP email is not configured");
  const transport=nodemailer.createTransport({host:process.env.SMTP_HOST||"smtp.gmail.com",port:Number(process.env.SMTP_PORT||465),secure:Number(process.env.SMTP_PORT||465)===465,auth:{user:process.env.SMTP_USER,pass:process.env.SMTP_PASS}});
- return transport.sendMail({from:process.env.SMTP_FROM||"greenair.invoicing@gmail.com",to,subject,text:body});
+ return transport.sendMail({from:process.env.SMTP_FROM||"greenair.controls@gmail.com",to,subject,text:body,attachments});
 }
 function maintMessage(v,reminder=false){
  return ["Hi "+v.CustomerName+",","",reminder?"A reminder that your regular maintenance service with Greenair is scheduled for tomorrow.":"Your regular maintenance service with Greenair is scheduled.","","Date: "+v.NextDate,"Time: "+(v.Time||"To be confirmed"),"Site: "+(v.Address||""),"Equipment: "+(v.Equipment||""),"Service: "+(v.Description||""),"","Please contact Greenair if you need to change this booking.","","Regards,","Greenair"].join("\r\n");
@@ -291,12 +291,87 @@ async function saveSchedule(req,res,editing){
 }
 app.post("/schedule/new",(req,res)=>A(req,res,()=>saveSchedule(req,res,false)));
 app.post("/schedule/edit/:key",(req,res)=>A(req,res,()=>saveSchedule(req,res,true)));
+
+const scheduleRecipient="greenair.controls@gmail.com";
+function adelaideParts(){
+ const parts=new Intl.DateTimeFormat("en-GB",{timeZone:"Australia/Adelaide",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hourCycle:"h23"}).formatToParts(new Date());
+ const p=Object.fromEntries(parts.filter(x=>x.type!=="literal").map(x=>[x.type,x.value]));
+ return {date:p.year+"-"+p.month+"-"+p.day,hour:Number(p.hour),minute:Number(p.minute)};
+}
+function scheduleWeekDates(day){
+ const base=new Date(day+"T12:00:00Z");if(Number.isNaN(base.getTime()))throw Error("Invalid date");
+ base.setUTCDate(base.getUTCDate()-((base.getUTCDay()+6)%7));
+ return Array.from({length:7},(_,i)=>{const d=new Date(base);d.setUTCDate(base.getUTCDate()+i);return d.toISOString().slice(0,10)});
+}
+async function weeklyJobs(day){
+ const days=scheduleWeekDates(day),rows=(await Q("select payload from records where record_type='schedule'")).rows;
+ const jobs=rows.map(r=>D(r.payload)).filter(j=>days.includes(j.Date)).sort((a,b)=>(a.Date||"").localeCompare(b.Date||"")||(a.Start||"").localeCompare(b.Start||""));
+ return {days,jobs};
+}
+function pdfWeeklySchedule(report){
+ return new Promise((resolve,reject)=>{
+  const doc=new PDFDocument({size:"A4",margin:44,info:{Title:"Greenair Weekly Job Schedule",Author:"Greenair"}});
+  const buffers=[];doc.on("data",c=>buffers.push(c));doc.on("error",reject);doc.on("end",()=>resolve(Buffer.concat(buffers)));
+  const L=doc.page.width-88;
+  function heading(){
+   doc.font("Helvetica-Bold").fontSize(19).fillColor("#145633").text("GREENAIR",44,39);
+   doc.font("Helvetica").fontSize(10).fillColor("#444444").text("Weekly Job Schedule",44,66);
+   doc.fontSize(9).text(report.days[0]+" to "+report.days[6],44,83);
+   doc.moveTo(44,103).lineTo(44+L,103).strokeColor("#b5c7bc").stroke();
+   doc.y=116;
+  }
+  function room(n){if(doc.y+n>doc.page.height-60){doc.addPage();heading()}}
+  heading();
+  for(const day of report.days){
+   room(48);
+   doc.moveDown(.6).font("Helvetica-Bold").fontSize(12).fillColor("#145633").text(new Intl.DateTimeFormat("en-AU",{timeZone:"UTC",weekday:"long",day:"numeric",month:"long"}).format(new Date(day+"T12:00:00Z")),{continued:false});
+   const jobs=report.jobs.filter(j=>j.Date===day);
+   if(!jobs.length){doc.font("Helvetica").fontSize(9).fillColor("#777777").text("No bookings", {indent:12});doc.moveDown(.35);continue}
+   for(const j of jobs){
+    room(95);
+    const line=[j.Start||"",j.End?"- "+j.End:"",j.CustomerName||"Client"].filter(Boolean).join(" ");
+    doc.font("Helvetica-Bold").fontSize(10).fillColor("#1f2d24").text(line,{indent:11});
+    doc.font("Helvetica").fontSize(9).fillColor("#333333");
+    if(j.Address)doc.text("Site: "+String(j.Address),{indent:11});
+    if(j.Description)doc.text("Work: "+String(j.Description),{indent:11});
+    if(j.Technician)doc.text("Technician: "+String(j.Technician),{indent:11});
+    if(j.Status)doc.text("Status: "+String(j.Status),{indent:11});
+    doc.moveDown(.45);
+   }
+  }
+  doc.end();
+ });
+}
+app.get("/schedule/week.pdf",(req,res)=>A(req,res,async()=>{
+ try{
+  const day=/^\d{4}-\d{2}-\d{2}$/.test(req.query.day||"")?req.query.day:adelaideParts().date;
+  const report=await weeklyJobs(day),pdf=await pdfWeeklySchedule(report);
+  res.set("Content-Type","application/pdf");
+  res.set("Content-Disposition",'attachment; filename="Greenair-Weekly-Schedule-'+report.days[0]+'.pdf"');
+  res.send(pdf);
+ }catch(e){console.error("weekly schedule pdf",e);res.status(500).send("Unable to create weekly schedule PDF")}
+}));
+async function dailySchedulePdfTick(){
+ const now=adelaideParts();
+ if(now.hour!==7||now.minute>15||!maintMailReady())return;
+ const id="automation:weekly-pdf:"+now.date;
+ const report=await weeklyJobs(now.date);
+ // Claim this day's send to prevent duplicate emails on overlapping ticks.
+ const claim=await Q("insert into records(record_key,record_type,payload) values($1,'automation',$2) on conflict (record_key) do nothing",[id,{Json:J({Date:now.date,Status:"sending"})}]);
+ if(!claim.rowCount)return;
+ try{
+  const pdf=await pdfWeeklySchedule(report);
+  await maintEmail(scheduleRecipient,"Greenair Weekly Schedule - "+report.days[0]+" to "+report.days[6],"Good morning,\r\n\r\nAttached is the Greenair job schedule for this week ("+report.days[0]+" to "+report.days[6]+").\r\n\r\n"+report.jobs.length+" bookings are listed.\r\n\r\nRegards,\r\nGreenair",[{filename:"Greenair-Weekly-Schedule-"+report.days[0]+".pdf",content:pdf,contentType:"application/pdf"}]);
+  await Q("update records set payload=$2,updated_at=now() where record_key=$1",[id,{Json:J({Date:now.date,Status:"sent",Count:report.jobs.length})}]);
+ }catch(e){console.error("daily schedule PDF email failed",e.message);await Q("delete from records where record_key=$1",[id]);}
+}
+
 app.get("/schedule/week",(req,res)=>A(req,res,async()=>{
  const base=/^\d{4}-\d{2}-\d{2}$/.test(req.query.day||"")?req.query.day:new Date().toLocaleDateString("en-CA",{timeZone:"Australia/Adelaide"});
  const start=new Date(base+"T00:00:00Z");start.setUTCDate(start.getUTCDate()-((start.getUTCDay()+6)%7));
  const days=Array.from({length:7},(_,i)=>{const d=new Date(start);d.setUTCDate(d.getUTCDate()+i);return d.toISOString().slice(0,10)});
  const jobs=(await Q("select payload from records where record_type='schedule' order by updated_at desc limit 3000")).rows.map(r=>D(r.payload));
- const body='<h1>Weekly Schedule</h1><p><a href="/schedule?day='+base+'">Day View</a> | <a href="/schedule/new?day='+base+'">+ Add Booking</a></p>'+days.map(day=>'<div class=c><h3><a href="/schedule?day='+day+'">'+day+'</a></h3>'+jobs.filter(v=>v.Date===day).sort((a,b)=>(a.Start||"").localeCompare(b.Start||"")).map(v=>'<p><b>'+E(v.Start)+' '+E(v.CustomerName)+'</b> '+E(v.Description)+'</p>').join("")+'</div>').join("");
+ const body='<h1>Weekly Schedule</h1><p><a href="/schedule?day='+base+'">Day View</a> | <a href="/schedule/new?day='+base+'">+ Add Booking</a> | <a href="/schedule/week.pdf?day='+base+'">Download Weekly PDF</a></p><p>Daily 7:00 am email to greenair.controls@gmail.com (Adelaide time).</p>'+days.map(day=>'<div class=c><h3><a href="/schedule?day='+day+'">'+day+'</a></h3>'+jobs.filter(v=>v.Date===day).sort((a,b)=>(a.Start||"").localeCompare(b.Start||"")).map(v=>'<p><b>'+E(v.Start)+' '+E(v.CustomerName)+'</b> '+E(v.Description)+'</p>').join("")+'</div>').join("");
  res.send(L("Weekly Schedule",body,req.session.user));
 }));
 
@@ -663,4 +738,4 @@ app.get("/receipts/file/:id",(req,res)=>A(req,res,async()=>{
  }catch(e){console.error("receipt download",e);res.status(500).send("Receipt could not be opened")}
 }));
 
-const PORT=Number(process.env.PORT)||10000;app.listen(PORT,"0.0.0.0",()=>console.log(`Greenair Invoice listening on ${PORT}`));init().then(()=>{console.log("Database initialised");scheduledSnapshot();setInterval(scheduledSnapshot,SNAPSHOT_INTERVAL_MS).unref();maintenanceReminderTick().catch(console.error);setInterval(()=>maintenanceReminderTick().catch(console.error),60*60*1000).unref();}).catch(e=>console.error("Database init error",e));
+const PORT=Number(process.env.PORT)||10000;app.listen(PORT,"0.0.0.0",()=>console.log(`Greenair Invoice listening on ${PORT}`));init().then(()=>{console.log("Database initialised");scheduledSnapshot();setInterval(scheduledSnapshot,SNAPSHOT_INTERVAL_MS).unref();maintenanceReminderTick().catch(console.error);setInterval(()=>maintenanceReminderTick().catch(console.error),60*60*1000).unref();dailySchedulePdfTick().catch(console.error);setInterval(()=>dailySchedulePdfTick().catch(console.error),60*1000).unref();}).catch(e=>console.error("Database init error",e));
