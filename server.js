@@ -240,8 +240,21 @@ app.get("/schedule/email/:key",(req,res)=>A(req,res,async()=>{
  if(!email||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))return res.status(400).send(L("Customer email needed",'<div class=c><h2>Customer email required</h2><p>Add a valid email address to this customer before sending the booking.</p><a href="/schedule">Back to Schedule</a></div>',req.session.user));
  const subject="Greenair Booking Confirmation - "+(v.Date||"");
  const body=["Hi "+name+",","","This is confirmation of your booking with Greenair.","","Date: "+(v.Date||""),"Time: "+(v.Start||"")+" to "+(v.End||""),"Address: "+(v.Address||c.Address||""),"Work: "+(v.Description||""),"Technician: "+(v.Technician||""),"","Please contact us if you need to change this booking.","","Regards,","Greenair"].join("\r\n");
- const mailto="mailto:"+encodeURIComponent(email)+"?subject="+encodeURIComponent(subject)+"&body="+encodeURIComponent(body);
- res.set("Cache-Control","no-store").send(L("Email Booking",'<h1>Email Booking</h1><div class=c><p><b>To:</b> '+E(email)+'</p><p><b>Subject:</b> '+E(subject)+'</p><pre style="white-space:pre-wrap;font-family:inherit">'+E(body)+'</pre><p><a href="'+E(mailto)+'">Open email app to send</a></p><small>No email is sent until you send it from your email app.</small></div>',req.session.user));
+ res.set("Cache-Control","no-store").send(L("Email Booking",'<h1>Email Booking</h1><div class=c><p><b>To:</b> '+E(email)+'</p><p><b>Subject:</b> '+E(subject)+'</p><pre style="white-space:pre-wrap;font-family:inherit">'+E(body)+'</pre><form method=post><button '+(maintMailReady()?'':'disabled')+'>Send Email to Client</button></form><p>'+(maintMailReady()?'Press Send to email directly from Greenair.':'Outgoing Greenair email is not configured.')+'</p><a href="/schedule?day='+encodeURIComponent(v.Date||"")+'">Back to Schedule</a></div>',req.session.user));
+}));
+app.post("/schedule/email/:key",(req,res)=>A(req,res,async()=>{
+ const row=(await Q("select payload from records where record_key=$1 and record_type='schedule'",[req.params.key])).rows[0];
+ if(!row)return res.status(404).send("Booking not found");
+ const v=D(row.payload),customer=(await Q("select payload from records where record_key=$1 and record_type='customer'",[v.CustomerKey||""])).rows[0],c=customer?D(customer.payload):{};
+ const email=String(c.Email||c.EmailAddress||"").trim();
+ if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))return res.status(400).send("Customer email address missing");
+ const body=["Hi "+(v.CustomerName||c.Name||"Customer")+",","","This is confirmation of your booking with Greenair.","","Date: "+(v.Date||""),"Time: "+(v.Start||"")+" to "+(v.End||""),"Address: "+(v.Address||c.Address||""),"Work: "+(v.Description||""),"Technician: "+(v.Technician||""),"","Please contact us if you need to change this booking.","","Regards,","Greenair"].join("\r\n");
+ try{
+   await maintEmail(email,"Greenair Booking Confirmation - "+(v.Date||""),body);
+   v.EmailSentAt=new Date().toISOString();v.EmailSentTo=email;
+   await Q("update records set payload=$2,updated_at=now() where record_key=$1 and record_type='schedule'",[req.params.key,{Json:J(v)}]);
+   res.send(L("Booking Email Sent",'<h1>Booking email sent</h1><div class=c><p>Confirmation sent to '+E(email)+'.</p><a href="/schedule?day='+encodeURIComponent(v.Date||"")+'">Back to Schedule</a></div>',req.session.user));
+ }catch(e){console.error("schedule email",e.message);res.status(503).send(L("Booking Email Failed",'<h1>Booking saved, email not sent</h1><div class=c><p>Please check the Greenair Gmail SMTP settings, then retry.</p><a href="/schedule/email/'+encodeURIComponent(req.params.key)+'">Retry sending booking email</a></div>',req.session.user));}
 }));
 async function scheduleForm(req,res,editing){
  const key=req.params.key||"",row=editing?(await Q("select payload from records where record_key=$1 and record_type='schedule'",[key])).rows[0]:null;
@@ -250,7 +263,7 @@ async function scheduleForm(req,res,editing){
  const cs=(await Q("select record_key,payload from records where record_type='customer' order by updated_at desc limit 2000")).rows;
  const opts=cs.map(r=>{const c=D(r.payload);return '<option value="'+E(r.record_key)+'" '+(v.CustomerKey===r.record_key?"selected":"")+'>'+E(c.Name||c.CustomerName||c.CompanyName||r.record_key)+'</option>'}).join("");
  const input=(label,name,type="text",required=false)=>'<label style="display:block;margin:12px 0">'+label+'<input style="display:block;width:100%;box-sizing:border-box" type="'+type+'" name="'+name+'" value="'+E(v[name]||"")+'" '+(required?"required":"")+'></label>';
- const body='<h1>'+(editing?"Edit Booking":"New Booking")+'</h1><div class=c><form method=post><label>Existing Customer<select name=CustomerKey style="display:block;width:100%;padding:12px"><option value="">Choose existing or add new below</option>'+opts+'</select></label><details><summary>Add new customer</summary>'+input("Customer name","NewName")+input("Phone","NewPhone")+input("Email","NewEmail","email")+input("Address","NewAddress")+'</details>'+input("Date","Date","date",true).replace('value=""','value="'+E(day)+'"')+input("Start","Start","time",true)+input("Finish","End","time",true)+input("Job description","Description")+input("Job address","Address")+input("Technician","Technician")+'<label>Status <select name=Status>'+["Scheduled","In Progress","Completed","Cancelled"].map(x=>'<option '+(v.Status===x?"selected":"")+'>'+x+'</option>').join("")+'</select></label><p><button>Save Booking</button> <a href="/schedule?day='+encodeURIComponent(day)+'">Cancel</a></p></form></div>';
+ const body='<h1>'+(editing?"Edit Booking":"New Booking")+'</h1><div class=c><form method=post><label>Existing Customer<select name=CustomerKey style="display:block;width:100%;padding:12px"><option value="">Choose existing or add new below</option>'+opts+'</select></label><details><summary>Add new customer</summary>'+input("Customer name","NewName")+input("Phone","NewPhone")+input("Email","NewEmail","email")+input("Address","NewAddress")+'</details>'+input("Date","Date","date",true).replace('value=""','value="'+E(day)+'"')+input("Start","Start","time",true)+input("Finish","End","time",true)+input("Job description","Description")+input("Job address","Address")+input("Technician","Technician")+'<label>Status <select name=Status>'+["Scheduled","In Progress","Completed","Cancelled"].map(x=>'<option '+(v.Status===x?"selected":"")+'>'+x+'</option>').join("")+'</select></label><p><label><input type=checkbox name=EmailClient value=yes> Email booking confirmation to client after saving</label></p><p><button>Save Booking</button> <a href="/schedule?day='+encodeURIComponent(day)+'">Cancel</a></p></form></div>';
  res.send(L("Job Booking",body,req.session.user));
 }
 app.get("/schedule/new",(req,res)=>A(req,res,()=>scheduleForm(req,res,false)));
@@ -273,6 +286,7 @@ async function saveSchedule(req,res,editing){
    const found=await Q("update records set payload=$2,updated_at=now() where record_key=$1 and record_type='schedule'",[id,{Json:J(v)}]);
    if(!found.rowCount)return res.status(404).send("Booking not found");
  }else await Q("insert into records(record_key,record_type,payload) values($1,'schedule',$2)",[id,{Json:J(v)}]);
+ if(b.EmailClient==="yes")return res.redirect(303,"/schedule/email/"+encodeURIComponent(id));
  res.redirect("/schedule?day="+encodeURIComponent(v.Date));
 }
 app.post("/schedule/new",(req,res)=>A(req,res,()=>saveSchedule(req,res,false)));
